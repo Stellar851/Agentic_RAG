@@ -589,35 +589,63 @@ class VectorStoreManager:
         print(f"🎯 [检索命中完成] 成功命中 {len(retrieved)} 个高相关度切片 (首条距离: {retrieved[0]['distance'] if retrieved else '无'})")
         return retrieved
 
+    def get_chunks_by_doc_name(self, doc_name: str, max_chunks: int = 100) -> List[Dict[str, Any]]:
+        """按文档名称提取所有切片数据"""
+        results = self.collection.get(
+            where={"doc_name": doc_name},
+            include=["documents", "metadatas"]
+        )
+        docs = results.get("documents", [])
+        metas = results.get("metadatas", [])
+        chunks = []
+        for doc_text, meta in zip(docs, metas):
+            chunks.append({
+                "chunk_index": meta.get("chunk_index", 0),
+                "total_chunks": meta.get("total_chunks", len(docs)),
+                "upload_time": meta.get("upload_time", "未知"),
+                "char_length": len(doc_text),
+                "text": doc_text
+            })
+        chunks.sort(key=lambda x: x.get("chunk_index", 0))
+        return chunks[:max_chunks]
+
     def list_all_documents(self) -> List[Dict[str, Any]]:
         """
         【功能】获取当前知识库中所有已入库的文档清单与统计信息
-
-        【返回值】
-            List[dict]: 包含每个文档的名称、切片总数、入库时间、本地文件是否存在等
         """
-        # 从 ChromaDB 获取所有元数据
+        from collections import Counter
         all_data = self.collection.get(include=["metadatas"])
         metadatas = all_data.get("metadatas", [])
 
-        docs_summary: Dict[str, Dict[str, Any]] = {}
-
+        doc_chunk_counter = Counter()
+        doc_first_meta: Dict[str, Dict[str, Any]] = {}
         for meta in metadatas:
             name = meta.get("doc_name")
             if not name:
                 continue
-            if name not in docs_summary:
-                local_path = os.path.join(UPLOAD_DIR, name)
-                file_size = os.path.getsize(local_path) if os.path.exists(local_path) else 0
-                docs_summary[name] = {
-                    "doc_name": name,
-                    "total_chunks": meta.get("total_chunks", 0),
-                    "upload_time": meta.get("upload_time", "未知"),
-                    "file_size_bytes": file_size,
-                    "file_size_formatted": f"{file_size / 1024:.1f} KB" if file_size else "0 KB"
-                }
+            doc_chunk_counter[name] += 1
+            if name not in doc_first_meta:
+                doc_first_meta[name] = meta
 
-        return list(docs_summary.values())
+        docs_summary = []
+        for name, chunk_cnt in doc_chunk_counter.items():
+            meta = doc_first_meta.get(name, {})
+            local_path = os.path.join(UPLOAD_DIR, name)
+            file_size = os.path.getsize(local_path) if os.path.exists(local_path) else 0
+            upload_time = meta.get("upload_time", "未知")
+            docs_summary.append({
+                "doc_name": name,
+                "name": name,
+                "total_chunks": chunk_cnt,
+                "chunk_count": chunk_cnt,
+                "upload_time": upload_time,
+                "created_at": upload_time,
+                "file_size_bytes": file_size,
+                "file_size_formatted": f"{file_size / 1024:.1f} KB" if file_size else "0 KB"
+            })
+
+        docs_summary.sort(key=lambda x: x["doc_name"])
+        return docs_summary
 
     def get_document_full_content(self, doc_name: str, max_chunks: int = 10) -> str:
         """

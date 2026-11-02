@@ -76,7 +76,7 @@ async def health_check():
     try:
         vs = get_vector_store()
         all_docs = vs.list_all_documents()
-        total_chunks = sum(d.get("chunk_count", 0) for d in all_docs)
+        total_chunks = vs.collection.count()
         return {
             "code": 200,
             "status": "healthy",
@@ -224,6 +224,24 @@ async def read_document_chunks(doc_name: str, max_chunks: int = 6):
                 "total_returned": len(chunks),
                 "chunks": chunks,
                 "formatted_text": formatted_text
+            }
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"code": 500, "message": str(e)})
+
+
+@app.get("/api/v1/data/documents/{doc_name:path}/chunks", summary="获取指定文档的切片数据详情")
+async def get_document_chunks_rest(doc_name: str):
+    """供前端大屏弹窗查看文档切片"""
+    try:
+        vs = get_vector_store()
+        chunks = vs.get_chunks_by_doc_name(doc_name=doc_name)
+        return {
+            "code": 200,
+            "data": {
+                "doc_name": doc_name,
+                "total_chunks": len(chunks),
+                "chunks": chunks
             }
         }
     except Exception as e:

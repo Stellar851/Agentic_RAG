@@ -288,7 +288,7 @@ let currentSessionId = null;
                 const result = await res.json();
                 if (result.code === 200) {
                     sessionsCache = result.data || [];
-                    sessionsCount.textContent = sessionsCache.length;
+                    if (sessionsCount) { sessionsCount.textContent = sessionsCache.length; }
                     renderSessions();
 
                     if (selectFirstIfAvailable && sessionsCache.length > 0) {

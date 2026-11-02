@@ -35,8 +35,11 @@ async function loadDocuments() {
         const docs = result.data?.documents || [];
 
         document.getElementById("stat-total-docs").innerText = docs.length;
-        const totalChunks = docs.reduce((acc, d) => acc + (d.chunk_count || 0), 0);
-        document.getElementById("stat-total-chunks").innerText = totalChunks;
+        const totalChunks = docs.reduce((acc, d) => acc + (d.chunk_count || d.total_chunks || 0), 0);
+        const statTotalEl = document.getElementById("stat-total-chunks");
+        if (statTotalEl && (!statTotalEl.innerText || statTotalEl.innerText === "0")) {
+            statTotalEl.innerText = totalChunks;
+        }
 
         if (docs.length === 0) {
             tableBody.innerHTML = `<tr><td colspan="5" style="text-align:center; padding:40px; color:#64748b;">知识库暂无文档，请在左侧拖拽上传新业务文件。</td></tr>`;
@@ -45,10 +48,10 @@ async function loadDocuments() {
 
         let html = "";
         docs.forEach(doc => {
-            const docName = doc.doc_name || "未命名文档";
-            const chunkCount = doc.chunk_count || 0;
+            const docName = doc.doc_name || doc.name || "未命名文档";
+            const chunkCount = (doc.chunk_count !== undefined) ? doc.chunk_count : (doc.total_chunks || 0);
             const fileSize = doc.file_size_formatted || "--";
-            const createdAt = doc.created_at || "--";
+            const createdAt = doc.created_at || doc.upload_time || "--";
 
             html += `
                 <tr>
