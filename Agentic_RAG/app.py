@@ -38,7 +38,7 @@ if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
 
 from fastapi import FastAPI, HTTPException, status
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -51,7 +51,7 @@ from models import (
     SUPPORTED_MODELS
 )
 from vector_store import get_vector_store
-from routers import knowledge, session, chat, benchmark
+from routers import knowledge, session, chat
 
 # 配置静默过滤器：过滤掉前端高频轮询的静默接口，避免控制台被无意义刷屏
 class EndpointSilenceFilter(logging.Filter):
@@ -97,7 +97,6 @@ if os.path.isdir(STATIC_DIR):
 
 TEMPLATES_DIR = os.path.join(CURRENT_DIR, "templates")
 INDEX_HTML_PATH = os.path.join(TEMPLATES_DIR, "index.html")
-BENCHMARK_HTML_PATH = os.path.join(TEMPLATES_DIR, "benchmark.html")
 
 # ==============================================================================
 # 二、 基础页面与系统状态自检路由
@@ -113,14 +112,10 @@ async def index():
     return HTMLResponse(content=html_content)
 
 
-@app.get("/benchmark", response_class=HTMLResponse, summary="渲染工业级全流程评估中枢页面")
+@app.get("/benchmark", summary="跳转至独立工业级评测中台微服务大屏")
 async def benchmark_page():
-    """读取并返回前端评测中枢 benchmark.html 页面"""
-    if not os.path.exists(BENCHMARK_HTML_PATH):
-        raise HTTPException(status_code=404, detail="评测中枢模板 benchmark.html 未找到")
-    with open(BENCHMARK_HTML_PATH, "r", encoding="utf-8") as f:
-        html_content = f.read()
-    return HTMLResponse(content=html_content)
+    """将请求优雅重定向至独立的评测中台服务大屏 (Port 8002)"""
+    return RedirectResponse(url="http://localhost:8002/", status_code=302)
 
 
 @app.get("/api/models", summary="获取系统支持的热切换模型列表")
@@ -204,7 +199,6 @@ async def get_system_status():
 app.include_router(knowledge.router)
 app.include_router(session.router)
 app.include_router(chat.router)
-app.include_router(benchmark.router)
 
 # ==============================================================================
 # 四、 服务入口 (Uvicorn ASGI 驱动)
