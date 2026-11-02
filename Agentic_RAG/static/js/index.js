@@ -21,14 +21,19 @@ let currentSessionId = null;
         let currentAbortController = null;
         let currentActiveStreamReader = null;
 
-        // 页面初始化
-        document.addEventListener('DOMContentLoaded', () => {
+        // 页面初始化（支持 DOMContentLoaded 与 readyState 立即就绪双通道触发）
+        function initApp() {
             loadSupportedModels();
             checkSystemStatus();
-            fetchDocuments();
             loadSessions(true);
             setupEventListeners();
-        });
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initApp);
+        } else {
+            initApp();
+        }
 
         function setupEventListeners() {
             // 新建会话
@@ -713,10 +718,21 @@ let currentSessionId = null;
 
         // 4. 发送问答与多轮记忆交互 (支持打字机式渐进流式输出、实时思考追踪与主动终止)
         async function sendMessage() {
-            if (currentAbortController) return; // 若正在生成中，避免重复提交
+            // 动态安全获取最新 DOM 节点
+            const inputEl = document.getElementById('user-input') || userInput;
+            const sendBtn = document.getElementById('btn-send') || btnSend;
+            const stopBtn = document.getElementById('btn-stop') || btnStop;
+            const container = document.getElementById('messages-container') || messagesContainer;
 
-            const query = userInput.value.trim();
+            if (!inputEl) return;
+            const query = inputEl.value.trim();
             if (!query) return;
+
+            // 自愈保护：如果生成按钮未显示但控制器处于异常锁定态，立即释放
+            if (currentAbortController && (!stopBtn || stopBtn.style.display !== 'flex')) {
+                currentAbortController = null;
+            }
+            if (currentAbortController) return;
 
             if (welcomeHero) welcomeHero.style.display = 'none';
 
@@ -1051,3 +1067,7 @@ let currentSessionId = null;
                 .replace(/"/g, "&quot;")
                 .replace(/'/g, "&#039;");
         }
+
+
+// 显式挂载到 window 作用域以支持内联属性回调
+window.sendMessage = sendMessage;
