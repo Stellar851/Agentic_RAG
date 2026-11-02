@@ -50,8 +50,8 @@ from models import (
     get_supported_models_list,
     SUPPORTED_MODELS
 )
-from vector_store import get_vector_store
-from routers import knowledge, session, chat
+# 已解耦：移除本地 vector_store 引用
+from routers import session, chat
 
 # 配置静默过滤器：过滤掉前端高频轮询的静默接口，避免控制台被无意义刷屏
 class EndpointSilenceFilter(logging.Filter):
@@ -168,9 +168,19 @@ async def get_system_status():
         except Exception as e:
             ollama_status["message"] = f"Ollama 服务异常: {str(e)}"
 
-        # 3. 检查向量数据库与文档总数
-        vs = get_vector_store()
-        doc_list = vs.list_all_documents()
+        # 3. 通过 HTTP 探查数据中台
+        data_platform_status = {"connected": False, "documents_count": 0, "total_chunks": 0}
+        try:
+            import urllib.request, json
+            req = urllib.request.Request("http://127.0.0.1:8001/api/v1/data/health", headers={"User-Agent": "AgentApp"})
+            with urllib.request.urlopen(req, timeout=2) as res:
+                if res.status == 200:
+                    dp_data = json.loads(res.read()).get("data", {})
+                    data_platform_status["connected"] = True
+                    data_platform_status["documents_count"] = dp_data.get("total_documents", 0)
+                    data_platform_status["total_chunks"] = dp_data.get("total_chunks", 0)
+        except Exception as e:
+            data_platform_status["message"] = str(e)
 
         return {
             "code": 200,
@@ -178,8 +188,9 @@ async def get_system_status():
             "data": {
                 "deepseek": llm_status,
                 "ollama": ollama_status,
-                "documents_count": len(doc_list),
-                "total_chunks": sum(d.get("total_chunks", 0) for d in doc_list)
+                "data_platform": data_platform_status,
+                "documents_count": data_platform_status["documents_count"],
+                "total_chunks": data_platform_status["total_chunks"]
             }
         }
     except Exception as e:
@@ -196,7 +207,7 @@ async def get_system_status():
 # 三、 挂载各业务解耦子路由
 # ==============================================================================
 
-app.include_router(knowledge.router)
+# 已解耦：文档上传管理收敛至数据中台 (Port 8001)
 app.include_router(session.router)
 app.include_router(chat.router)
 

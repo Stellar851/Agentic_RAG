@@ -47,10 +47,23 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 # 导入内部模块
 from models import get_deepseek_llm
-from vector_store import get_vector_store
+# 已解耦：纯 HTTP 远程接入数据中台 (Port 8001)
 
 # 数据中台微服务通信配置 (Port 8001)
 DATA_PLATFORM_URL = os.getenv('DATA_PLATFORM_URL', 'http://localhost:8001')
+
+
+def _get_data_platform_doc_names() -> set:
+    """通过 HTTP 从数据中台获取最新合法文档名称集合"""
+    import requests
+    try:
+        resp = requests.get(f"{DATA_PLATFORM_URL}/api/v1/data/documents", timeout=5)
+        if resp.status_code == 200:
+            docs = resp.json().get("data", {}).get("documents", [])
+            return {d.get("doc_name") for d in docs if d.get("doc_name")}
+    except Exception:
+        pass
+    return set()
 
 def _call_data_platform_retrieve(query: str, doc_name_filter: Optional[str] = None) -> Optional[str]:
     import requests
@@ -175,117 +188,59 @@ def _budget_contexts(contexts: List[str], total_chars: int = AGENT_RECOVERY_CONT
 def list_available_documents() -> str:
     """
     【工具功能】获取知识库中当前已上传的所有文档列表及简要统计信息。
-
-    【何时使用】
-    当用户的问题比较宏观、涉及多个文档的对比、或者你想了解知识库涵盖哪些具体文档时，
-    优先调用此工具，获取全部候选文档名称，以便制定精准的检索计划。
-
-    【返回值】
-    JSON 格式的文档名称列表与切片数说明。
     """
-    print("\n📚 [Agent 触发工具] list_available_documents: 正在读取知识库文档目录...")
-    vs = get_vector_store()
-    docs = vs.list_all_documents()
-    if not docs:
-        return "当前知识库为空，尚未上传任何文档。"
-
-    summary_list = []
-    for d in docs:
-        summary_list.append({
-            "文档名称": d["doc_name"],
-            "切片总数": d["total_chunks"],
-            "文件大小": d["file_size_formatted"]
-        })
-    return json.dumps(summary_list, ensure_ascii=False, indent=2)
+    import requests
+    print("\n📚 [Agent 触发工具] list_available_documents: 正在通过 HTTP 从数据中台 (Port 8001) 读取知识库文档资产...")
+    try:
+        resp = requests.get(f"{DATA_PLATFORM_URL}/api/v1/data/documents", timeout=5)
+        if resp.status_code == 200:
+            docs = resp.json().get("data", {}).get("documents", [])
+            if not docs:
+                return "当前知识库为空，尚未录入任何业务文档。"
+            summary_list = []
+            for d in docs:
+                summary_list.append({
+                    "文档名称": d.get("doc_name"),
+                    "切片总数": d.get("chunk_count") or d.get("total_chunks", 0),
+                    "文件大小": d.get("file_size_formatted", "--")
+                })
+            return json.dumps(summary_list, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return f"数据中台连接异常: {e}"
+    return "获取文档清单失败"
 
 
 @tool
 def search_knowledge_base(query: str, doc_name_filter: Optional[str] = None) -> str:
     """
-    【工具功能】在知识库中进行语义相似度向量检索，并经过本地双层阈值截断 (Top-K 初筛距离截断 + Top-N 重排得分截断)。
-
-    【参数说明】
-    - query: 检索查询词或自然语言问题。
-    - doc_name_filter (可选): 如果你知道目标在某篇特定文档中，可传入文档名称（如 "用户手册.docx"），
-      进行精确过滤检索；如果不传或为空，则在所有文档中跨文档全局检索。
-
-    【何时使用】
-    寻找具体概念、段落、参数、关联依据或上下文事实时调用。支持多次针对不同关键词发起检索。
+    【工具功能】在知识库中进行语义相似度向量检索，由数据中台统一执行两阶段高信噪比漏斗过滤。
     """
-    from reranker import get_local_reranker, DEFAULT_DISTANCE_THRESHOLD, DEFAULT_RERANK_THRESHOLD
-
-    # 1. 优先通过 HTTP 远程调用独立数据中台微服务 (Port 8001)
     remote_data = _call_data_platform_retrieve(query=query, doc_name_filter=doc_name_filter)
     if remote_data is not None:
         return remote_data
-
-    # 2. 本地回退降级保护 (当中台未单独启动时)
-    filter_hint = f" (限定文档='{doc_name_filter}')" if doc_name_filter else " (全库跨文档检索)"
-    vs = get_vector_store()
-    top_k = 6 if doc_name_filter else 10
-    candidate_chunks = vs.query_similar_chunks(query=query, top_k=top_k, doc_name_filter=doc_name_filter)
-    print(f"  检索到: {len(candidate_chunks)} 个切片 (Chroma 向量初筛 距离 <= {DEFAULT_DISTANCE_THRESHOLD})")
-
-    if not candidate_chunks:
-        target_desc = f"在文档【{doc_name_filter}】中" if doc_name_filter else "在全库中"
-        print(f"  重排为: 0 个切片 (未初筛到候选切片)")
-        return f"{target_desc}未能初筛到与 '{query}' 相关的片段，请尝试更换检索关键词或扩大检索范围。"
-
-    # 执行第二阶段：双层阈值截断漏斗 (第一层距离截断 + 第二层精排得分截断)
-    reranker = get_local_reranker()
-    top_n = 3 if not doc_name_filter else 4
-    rerank_res = reranker.rerank_and_filter(
-        query=query,
-        candidate_chunks=candidate_chunks,
-        top_k=top_k,
-        distance_threshold=DEFAULT_DISTANCE_THRESHOLD,
-        top_n=top_n,
-        rerank_threshold=DEFAULT_RERANK_THRESHOLD
-    )
-
-    final_chunks = rerank_res["final_chunks"]
-
-    # 若所有切片均未通过截断把关，触发标准诚实拒答凭据
-    if not final_chunks or rerank_res["is_all_refused"]:
-        target_desc = f"文档【{doc_name_filter}】" if doc_name_filter else "全量知识库"
-        print(f"  重排为: 0 个切片 (触发诚实拒答: 得分 < {DEFAULT_RERANK_THRESHOLD})")
-        return (
-            f"【权威核验结果】经系统两阶段高信噪比阈值过滤，{target_desc}中未检索到任何符合业务相关度标准的有效条款或段落。\n"
-            f"（所有候选切片距离均超过阈值 {DEFAULT_DISTANCE_THRESHOLD} 或语义重排得分低于 {DEFAULT_RERANK_THRESHOLD}）。\n"
-            f"请直接向用户诚实明确指出：当前知识库中未收录与 '{query}' 相关的内容或该业务未有明确规定，严禁主观凭空捏造答案。"
-        )
-
-    top1_score = final_chunks[0].get("rerank_score", "--") if final_chunks else "--"
-    print(f"  重排为: {len(final_chunks)} 个切片 (gte-rerank-v2 精排 最高得分 {top1_score})")
-
-    formatted_snippets = []
-    for i, r in enumerate(final_chunks, 1):
-        score_info = f" | 重排得分: {r.get('rerank_score', '--')}" if "rerank_score" in r else ""
-        formatted_snippets.append(
-            f"【来源 {i}】文档: 《{r['doc_name']}》 (切片 {r['chunk_index'] + 1}/{r['total_chunks']})\n"
-            f"相关度距离: {r['distance']}{score_info}\n"
-            f"内容片段:\n{r['text']}\n"
-            f"----------------------------------------"
-        )
-    return "\n\n".join(formatted_snippets)
+    return f"未能从数据中台检索到与 '{query}' 相关的片段，或数据中台当前不可用。"
 
 
 @tool
 def read_specific_document(doc_name: str, max_chunks: int = 6) -> str:
     """
     【工具功能】连续精读指定文档的上下文片段。
-
-    【参数说明】
-    - doc_name: 文档的完整名称 (例如 '系统架构设计说明书.docx')。
-    - max_chunks: 顺序读取的切片数，默认 6 个切片。
-
-    【何时使用】
-    当向量检索到的片段太碎片化，或者文档结构严密（如章节条款连续叙述）、
-    需要通读某篇核心文档的整体脉络时调用。
     """
-    print(f"\n📖 [Agent 触发工具] read_specific_document: 正在深度连续精读文档《{doc_name}》(前 {max_chunks} 切片)...")
-    vs = get_vector_store()
-    return vs.get_document_full_content(doc_name=doc_name, max_chunks=max_chunks)
+    import requests
+    import urllib.parse
+    print(f"\n📖 [Agent 触发工具] read_specific_document: 正在通过 HTTP 从数据中台精读文档《{doc_name}》...")
+    try:
+        resp = requests.get(
+            f"{DATA_PLATFORM_URL}/api/v1/data/document-chunks",
+            params={"doc_name": doc_name, "max_chunks": max_chunks},
+            timeout=8
+        )
+        if resp.status_code == 200:
+            data = resp.json().get("data", {})
+            return data.get("formatted_text", f"未读取到文档《{doc_name}》的内容。")
+    except Exception as e:
+        return f"精读文档《{doc_name}》异常: {e}"
+    return f"未能从数据中台获取文档《{doc_name}》的切片内容。"
 
 
 # 注册 Agent 可用的全部工具列表
@@ -503,8 +458,7 @@ class AgenticRAGService:
                 })
 
             # 双重校验：确保最终引用的文档必须是知识库中真实存在的文件，坚决过滤文档正文中的非文件名泛读书名号
-            vs = get_vector_store()
-            valid_existing_docs = {d["doc_name"] for d in vs.list_all_documents()}
+            valid_existing_docs = _get_data_platform_doc_names()
             filtered_docs = {d for d in referenced_docs if d in valid_existing_docs}
 
             # 拆分并去重证据块，避免同一条长检索结果被重复送入裁判。
