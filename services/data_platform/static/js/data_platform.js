@@ -17,6 +17,10 @@ async function loadHealthAndStats() {
             const data = result.data || {};
             document.getElementById("stat-total-docs").innerText = data.total_documents || 0;
             document.getElementById("stat-total-chunks").innerText = data.total_chunks || 0;
+            const sessEl = document.getElementById("stat-total-sessions");
+            if (sessEl) sessEl.innerText = data.total_sessions || 0;
+            const msgEl = document.getElementById("stat-total-messages");
+            if (msgEl) msgEl.innerText = data.total_messages || 0;
         }
     } catch (e) {
         console.error("加载健康统计失败:", e);

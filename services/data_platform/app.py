@@ -32,7 +32,11 @@ if CURRENT_DIR not in sys.path:
 
 from vector_store import get_vector_store, UPLOAD_DIR, CHROMA_PERSIST_DIR
 from reranker import get_local_reranker, DEFAULT_DISTANCE_THRESHOLD, DEFAULT_RERANK_THRESHOLD
+from chat_history_db import get_data_chat_db
 from schemas import (
+    SessionCreateRequest,
+    SessionTitleUpdateRequest,
+    SessionMessageAddRequest,
     DataRetrieveRequest,
     DocumentChunksRequest,
     ConfirmUploadRequest,
@@ -77,6 +81,8 @@ async def health_check():
         vs = get_vector_store()
         all_docs = vs.list_all_documents()
         total_chunks = vs.collection.count()
+        chat_db = get_data_chat_db()
+        mem_stats = chat_db.get_stats()
         return {
             "code": 200,
             "status": "healthy",
@@ -85,6 +91,8 @@ async def health_check():
             "data": {
                 "total_documents": len(all_docs),
                 "total_chunks": total_chunks,
+                "total_sessions": mem_stats["total_sessions"],
+                "total_messages": mem_stats["total_messages"],
                 "upload_dir": UPLOAD_DIR,
                 "chroma_dir": CHROMA_PERSIST_DIR,
                 "documents": [d.get("doc_name") for d in all_docs]
@@ -306,6 +314,104 @@ async def delete_document(doc_name: str):
             return {"code": 200, "message": f"文档《{doc_name}》及其向量切片已彻底清除"}
         else:
             return {"code": 404, "message": f"未找到文档《{doc_name}》"}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"code": 500, "message": str(e)})
+
+
+
+
+# ==============================================================================
+# 全局多智能体会话与多轮上下文记忆中枢 (Centralized Memory APIs)
+# ==============================================================================
+
+@app.get("/api/v1/data/sessions", summary="获取智能体会话清单 (支持按 agent_id 过滤)")
+async def list_agent_sessions(agent_id: Optional[str] = None):
+    try:
+        db = get_data_chat_db()
+        sessions = db.list_sessions(agent_id=agent_id)
+        return {"code": 200, "data": sessions}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"code": 500, "message": str(e)})
+
+
+@app.post("/api/v1/data/sessions", summary="创建新会话")
+async def create_agent_session(req: Optional[SessionCreateRequest] = None):
+    try:
+        title = "新对话"
+        agent_id = "agentic_rag_core"
+        if req:
+            if req.title:
+                title = req.title.strip() or "新对话"
+            if req.agent_id:
+                agent_id = req.agent_id.strip() or "agentic_rag_core"
+
+        db = get_data_chat_db()
+        sess = db.create_session(title=title, agent_id=agent_id)
+        return {"code": 200, "data": sess}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"code": 500, "message": str(e)})
+
+
+@app.get("/api/v1/data/sessions/{session_id}", summary="获取会话元数据与全部历史消息")
+async def get_agent_session(session_id: str):
+    try:
+        db = get_data_chat_db()
+        sess = db.get_session(session_id)
+        if not sess:
+            return JSONResponse(status_code=404, content={"code": 404, "message": "会话不存在"})
+        messages = db.get_session_messages(session_id)
+        return {
+            "code": 200,
+            "data": {
+                "session": sess,
+                "messages": messages
+            }
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"code": 500, "message": str(e)})
+
+
+@app.put("/api/v1/data/sessions/{session_id}/title", summary="动态更新会话标题")
+async def update_agent_session_title(session_id: str, req: SessionTitleUpdateRequest):
+    try:
+        db = get_data_chat_db()
+        ok = db.update_session_title(session_id, req.title.strip())
+        if ok:
+            return {"code": 200, "message": "会话标题更新成功"}
+        return JSONResponse(status_code=404, content={"code": 404, "message": "会话未找到"})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"code": 500, "message": str(e)})
+
+
+@app.post("/api/v1/data/sessions/{session_id}/messages", summary="持久化追加会话消息与证据链")
+async def add_agent_session_message(session_id: str, req: SessionMessageAddRequest):
+    try:
+        db = get_data_chat_db()
+        # 若会话不存在，自动以消息前20字命名并补全会话
+        if not db.get_session(session_id):
+            title = req.content.strip()[:20] if req.content else "新对话"
+            db.create_session(title=title)
+
+        msg_id = db.add_message(
+            session_id=session_id,
+            role=req.role,
+            content=req.content,
+            steps=req.steps,
+            referenced_docs=req.referenced_docs
+        )
+        return {"code": 200, "data": {"message_id": msg_id}}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"code": 500, "message": str(e)})
+
+
+@app.delete("/api/v1/data/sessions/{session_id}", summary="级联物理删除会话及所有消息")
+async def delete_agent_session(session_id: str):
+    try:
+        db = get_data_chat_db()
+        ok = db.delete_session(session_id)
+        if ok:
+            return {"code": 200, "message": "会话及其全部消息已彻底删除"}
+        return JSONResponse(status_code=404, content={"code": 404, "message": "会话未找到"})
     except Exception as e:
         return JSONResponse(status_code=500, content={"code": 500, "message": str(e)})
 

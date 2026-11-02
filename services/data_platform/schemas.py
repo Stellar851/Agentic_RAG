@@ -34,3 +34,26 @@ class ConfirmUploadRequest(BaseModel):
 class CancelUploadRequest(BaseModel):
     """数据中台：取消预检文档请求"""
     filename: str = Field(..., description="待放弃的文件名")
+
+
+# ==============================================================================
+# 全局多智能体会话与历史记忆模型
+# ==============================================================================
+
+class SessionCreateRequest(BaseModel):
+    """数据中台：创建会话请求"""
+    title: Optional[str] = Field("新对话", description="会话标题")
+    agent_id: Optional[str] = Field("agentic_rag_core", description="所属智能体业务标识")
+
+
+class SessionTitleUpdateRequest(BaseModel):
+    """数据中台：更新会话标题请求"""
+    title: str = Field(..., description="新的会话标题")
+
+
+class SessionMessageAddRequest(BaseModel):
+    """数据中台：追加历史消息请求"""
+    role: str = Field(..., description="角色: 'user' 或 'assistant'")
+    content: str = Field(..., description="消息正文内容")
+    steps: Optional[List[Dict[str, Any]]] = Field(None, description="智能体多跳推理步骤轨迹")
+    referenced_docs: Optional[List[str]] = Field(None, description="引用到的事实文档清单")

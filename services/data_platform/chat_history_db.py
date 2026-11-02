@@ -1,18 +1,13 @@
+# -*- coding: utf-8 -*-
 """
 ================================================================================
-Agentic RAG 企业级智能关联知识库系统
-对话历史与多会话持久化存储模块 (chat_history_db.py)
+数据中台 (Data Platform) 全局会话与对话记忆管理模块 (chat_history_db.py)
 
 【模块定位】
-本文件负责会话（Session）与消息历史（Messages）的持久化管理：
-1. 采用 Python 内置的 SQLite 数据库，零额外依赖，无需配置外部服务。
-2. 数据表设计：
-   - `chat_sessions`: 记录会话元数据（会话ID、会话标题、创建与最近活跃时间）。
-   - `chat_messages`: 记录每一轮消息（角色 user/assistant、问答正文、Agent 思考证据链 steps、引用文档）。
-3. 支持完整生命周期操作：
-   - 创建新会话、会话列表按时间倒序排列
-   - 消息追加、读取某会话的完整历史、删除会话、动态更新会话标题
-4. 彻底解决网页刷新后历史丢失、多话题无法切换分类的核心痛点。
+负责企业级数据中台中多智能体（Multi-Agent）会话生命周期与消息历史的持久化存储：
+1. 统一数据资产：存储所有接入中台的业务 Agent 的对话 Session 与消息流水；
+2. 多租户隔离：原生内置 `agent_id` 字段，支持不同业务系统 Agent 独立索引与跨智能体共享；
+3. 支持步骤轨迹存储：持久化保存 Agent 的思考过程（thought）与工具调用（steps_json）。
 ================================================================================
 """
 
@@ -23,15 +18,14 @@ import uuid
 import datetime
 from typing import List, Dict, Any, Optional
 
-# 数据库存储路径 (放在 Agentic_RAG 项目根目录下)
 BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
 DB_FILE_PATH: str = os.path.join(BASE_DIR, "chat_history.db")
 
 
-class ChatHistoryDB:
+class DataPlatformChatDB:
     """
-    【类名】ChatHistoryDB
-    【功能】封装对 SQLite 历史会话数据库的所有增删查改操作
+    【类名】DataPlatformChatDB
+    【功能】封装数据中台对 SQLite 会话与历史消息库的高性能持久化操作
     """
 
     def __init__(self, db_path: str = DB_FILE_PATH):
@@ -39,75 +33,79 @@ class ChatHistoryDB:
         self._init_tables()
 
     def _get_connection(self) -> sqlite3.Connection:
-        """获取 SQLite 连接，设置 row_factory 为 Row 以支持字典风格访问"""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         return conn
 
     def _init_tables(self):
-        """初始化数据表结构"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            
-            # 1. 会话表 (chat_sessions)
+            # 1. 会话表 (chat_sessions) 支持 agent_id
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS chat_sessions (
                     session_id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
+                    agent_id TEXT DEFAULT 'agentic_rag_core',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_agent ON chat_sessions(agent_id)")
 
             # 2. 消息表 (chat_messages)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS chat_messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id TEXT NOT NULL,
-                    role TEXT NOT NULL,              -- 'user' 或 'assistant'
+                    role TEXT NOT NULL,
                     content TEXT NOT NULL,
-                    steps_json TEXT,                 -- Agent 思考轨迹 JSON 序列化字符串
-                    referenced_docs_json TEXT,       -- 引用来源文档列表 JSON
+                    steps_json TEXT,
+                    referenced_docs_json TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (session_id) REFERENCES chat_sessions(session_id) ON DELETE CASCADE
                 );
             """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_sess ON chat_messages(session_id)")
             conn.commit()
 
-    def create_session(self, title: str = "新对话") -> Dict[str, Any]:
-        """
-        【功能】创建一个新的会话
-        【返回值】包含新 session_id 与基本信息的字典
-        """
+    def create_session(self, title: str = "新对话", agent_id: str = "agentic_rag_core") -> Dict[str, Any]:
+        """为特定 Agent 创建新会话"""
         session_id = str(uuid.uuid4())
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO chat_sessions (session_id, title, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
-            """, (session_id, title, now_str, now_str))
+                INSERT INTO chat_sessions (session_id, title, agent_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (session_id, title, agent_id, now_str, now_str))
             conn.commit()
 
         return {
             "session_id": session_id,
             "title": title,
+            "agent_id": agent_id,
             "created_at": now_str,
             "updated_at": now_str
         }
 
-    def list_sessions(self) -> List[Dict[str, Any]]:
-        """
-        【功能】获取所有会话列表，按最后更新时间倒序排列
-        """
+    def list_sessions(self, agent_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """获取会话列表，可按 agent_id 过滤，按更新时间倒序"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT session_id, title, created_at, updated_at
-                FROM chat_sessions
-                ORDER BY updated_at DESC
-            """)
+            if agent_id:
+                cursor.execute("""
+                    SELECT session_id, title, agent_id, created_at, updated_at
+                    FROM chat_sessions
+                    WHERE agent_id = ?
+                    ORDER BY updated_at DESC
+                """, (agent_id,))
+            else:
+                cursor.execute("""
+                    SELECT session_id, title, agent_id, created_at, updated_at
+                    FROM chat_sessions
+                    ORDER BY updated_at DESC
+                """)
             rows = cursor.fetchall()
             return [dict(r) for r in rows]
 
@@ -116,7 +114,7 @@ class ChatHistoryDB:
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT session_id, title, created_at, updated_at
+                SELECT session_id, title, agent_id, created_at, updated_at
                 FROM chat_sessions
                 WHERE session_id = ?
             """, (session_id,))
@@ -124,7 +122,7 @@ class ChatHistoryDB:
             return dict(row) if row else None
 
     def update_session_title(self, session_id: str, title: str) -> bool:
-        """更新会话标题（通常在第一次用户提问后自动生成标题）"""
+        """更新会话标题"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -143,23 +141,19 @@ class ChatHistoryDB:
         steps: Optional[List[Dict[str, Any]]] = None,
         referenced_docs: Optional[List[str]] = None
     ) -> int:
-        """
-        【功能】向指定会话追加一条消息，并自动刷新会话的 updated_at 时间
-        """
+        """向指定会话追加消息并刷新会话时间戳"""
         steps_json = json.dumps(steps, ensure_ascii=False) if steps else None
         referenced_docs_json = json.dumps(referenced_docs, ensure_ascii=False) if referenced_docs else None
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            # 1. 插入消息
             cursor.execute("""
                 INSERT INTO chat_messages (session_id, role, content, steps_json, referenced_docs_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (session_id, role, content, steps_json, referenced_docs_json, now_str))
             msg_id = cursor.lastrowid
 
-            # 2. 更新对应会话的活跃时间
             cursor.execute("""
                 UPDATE chat_sessions
                 SET updated_at = ?
@@ -170,9 +164,7 @@ class ChatHistoryDB:
             return msg_id
 
     def get_session_messages(self, session_id: str) -> List[Dict[str, Any]]:
-        """
-        【功能】获取某个会话的所有历史消息，按时间正序排列
-        """
+        """获取会话全部历史消息"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -199,9 +191,7 @@ class ChatHistoryDB:
             return messages
 
     def delete_session(self, session_id: str) -> bool:
-        """
-        【功能】删除会话及其所有关联消息
-        """
+        """删除指定会话及关联消息"""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
@@ -209,13 +199,24 @@ class ChatHistoryDB:
             conn.commit()
             return cursor.rowcount > 0
 
+    def get_stats(self) -> Dict[str, int]:
+        """获取全局会话与消息统计"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM chat_sessions")
+            total_sessions = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM chat_messages")
+            total_messages = cursor.fetchone()[0]
+            return {
+                "total_sessions": total_sessions,
+                "total_messages": total_messages
+            }
 
-# 全局单例管理器
-_global_chat_db: Optional[ChatHistoryDB] = None
 
-def get_chat_db() -> ChatHistoryDB:
-    """获取会话历史数据库管理器的单例"""
-    global _global_chat_db
-    if _global_chat_db is None:
-        _global_chat_db = ChatHistoryDB()
-    return _global_chat_db
+_global_data_chat_db: Optional[DataPlatformChatDB] = None
+
+def get_data_chat_db() -> DataPlatformChatDB:
+    global _global_data_chat_db
+    if _global_data_chat_db is None:
+        _global_data_chat_db = DataPlatformChatDB()
+    return _global_data_chat_db

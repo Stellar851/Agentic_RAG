@@ -9,15 +9,83 @@ Agentic RAG 企业级智能关联知识库系统
 ================================================================================
 """
 
+import os
 import json
 import traceback
+from typing import Optional, List, Dict, Any
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from models import ACTIVE_LLM_MODEL
 from agent import get_agent_service
-from chat_history_db import get_chat_db
+# 已解耦：会话与消息管理 100% 委托数据中台 (Port 8001)
 from schemas import ChatRequest
+
+import requests
+
+DATA_PLATFORM_URL = os.getenv("DATA_PLATFORM_URL", "http://127.0.0.1:8001")
+
+
+def _dp_get_session(session_id: str) -> Optional[dict]:
+    try:
+        resp = requests.get(f"{DATA_PLATFORM_URL}/api/v1/data/sessions/{session_id}", timeout=5)
+        if resp.status_code == 200:
+            return resp.json().get("data", {}).get("session")
+    except Exception:
+        pass
+    return None
+
+
+def _dp_create_session(title: str) -> dict:
+    try:
+        resp = requests.post(
+            f"{DATA_PLATFORM_URL}/api/v1/data/sessions",
+            json={"title": title, "agent_id": "agentic_rag_core"},
+            timeout=5
+        )
+        if resp.status_code == 200:
+            return resp.json().get("data", {})
+    except Exception:
+        pass
+    return {"session_id": "fallback-session"}
+
+
+def _dp_get_messages(session_id: str) -> list:
+    try:
+        resp = requests.get(f"{DATA_PLATFORM_URL}/api/v1/data/sessions/{session_id}", timeout=5)
+        if resp.status_code == 200:
+            return resp.json().get("data", {}).get("messages", [])
+    except Exception:
+        pass
+    return []
+
+
+def _dp_update_session_title(session_id: str, title: str):
+    try:
+        requests.put(
+            f"{DATA_PLATFORM_URL}/api/v1/data/sessions/{session_id}/title",
+            json={"title": title},
+            timeout=5
+        )
+    except Exception as e:
+        print(f"⚠️ [数据中台更新标题异常] {e}")
+
+
+def _dp_add_message(session_id: str, role: str, content: str, steps: list = None, referenced_docs: list = None):
+    try:
+        requests.post(
+            f"{DATA_PLATFORM_URL}/api/v1/data/sessions/{session_id}/messages",
+            json={
+                "role": role,
+                "content": content,
+                "steps": steps or [],
+                "referenced_docs": referenced_docs or []
+            },
+            timeout=5
+        )
+    except Exception as e:
+        print(f"⚠️ [数据中台消息持久化异常] {e}")
+
 
 router = APIRouter(prefix="/api", tags=["智能对话中枢"])
 
@@ -36,18 +104,16 @@ async def chat(req: ChatRequest):
     if not user_query:
         return JSONResponse(status_code=400, content={"code": 400, "message": "提问内容不能为空"})
 
-    db = get_chat_db()
-
-    # 1. 确保 session_id 有效，如果未传则自动创建
+    # 1. 确保 session_id 有效，如果未传或不存在则委托数据中台自动创建
     is_new_session = False
-    if not session_id or not db.get_session(session_id):
-        new_sess = db.create_session(title=user_query[:20] if len(user_query) > 20 else user_query)
+    if not session_id or not _dp_get_session(session_id):
+        new_sess = _dp_create_session(title=user_query[:20] if len(user_query) > 20 else user_query)
         session_id = new_sess["session_id"]
         is_new_session = True
 
     try:
-        # 2. 从数据库加载该会话的历史消息构建上下文
-        db_messages = db.get_session_messages(session_id)
+        # 2. 从数据中台加载该会话的历史消息构建多轮上下文
+        db_messages = _dp_get_messages(session_id)
 
         chat_history_for_agent = []
         if explicit_history is not None:
@@ -60,13 +126,13 @@ async def chat(req: ChatRequest):
                 })
 
         # 3. 保存用户的提问消息到 SQLite
-        db.add_message(session_id=session_id, role="user", content=user_query)
+        _dp_add_message(session_id=session_id, role="user", content=user_query)
 
         # 若是已有会话但只有默认标题 "新对话"，用第一个问题命名
-        current_sess = db.get_session(session_id)
+        current_sess = _dp_get_session(session_id)
         if current_sess and current_sess.get("title") in ["新对话", ""]:
             title_text = user_query[:18] + ("..." if len(user_query) > 18 else "")
-            db.update_session_title(session_id, title_text)
+            _dp_update_session_title(session_id, title_text)
 
         agent_service = get_agent_service()
         mode_desc = "打字机流式 (SSE)" if stream_mode else "单次同步响应"
@@ -103,7 +169,7 @@ async def chat(req: ChatRequest):
 
                 # 流式全部结束后，一次性将完整回答写入 SQLite 数据库
                 if accumulated_answer:
-                    db.add_message(
+                    _dp_add_message(
                         session_id=session_id,
                         role="assistant",
                         content=accumulated_answer,
@@ -135,7 +201,7 @@ async def chat(req: ChatRequest):
             referenced_docs = result.get("referenced_docs", [])
             model_used = result.get("model_name", target_model or ACTIVE_LLM_MODEL)
 
-            db.add_message(
+            _dp_add_message(
                 session_id=session_id,
                 role="assistant",
                 content=answer,

@@ -50,7 +50,7 @@ from models import get_deepseek_llm
 # 已解耦：纯 HTTP 远程接入数据中台 (Port 8001)
 
 # 数据中台微服务通信配置 (Port 8001)
-DATA_PLATFORM_URL = os.getenv('DATA_PLATFORM_URL', 'http://localhost:8001')
+DATA_PLATFORM_URL = os.getenv('DATA_PLATFORM_URL', 'http://127.0.0.1:8001')
 
 
 def _get_data_platform_doc_names() -> set:
@@ -76,7 +76,7 @@ def _call_data_platform_retrieve(query: str, doc_name_filter: Optional[str] = No
                 "top_k": 6 if doc_name_filter else 10,
                 "top_n": 4 if doc_name_filter else 3
             },
-            timeout=8
+            timeout=15
         )
         if resp.status_code == 200:
             data = resp.json().get("data", {})
@@ -233,7 +233,7 @@ def read_specific_document(doc_name: str, max_chunks: int = 6) -> str:
         resp = requests.get(
             f"{DATA_PLATFORM_URL}/api/v1/data/document-chunks",
             params={"doc_name": doc_name, "max_chunks": max_chunks},
-            timeout=8
+            timeout=15
         )
         if resp.status_code == 200:
             data = resp.json().get("data", {})
