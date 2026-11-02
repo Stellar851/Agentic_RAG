@@ -49,6 +49,35 @@ from langchain_core.messages import AIMessage, HumanMessage
 from models import get_deepseek_llm
 from vector_store import get_vector_store
 
+# 数据中台微服务通信配置 (Port 8001)
+DATA_PLATFORM_URL = os.getenv('DATA_PLATFORM_URL', 'http://localhost:8001')
+
+def _call_data_platform_retrieve(query: str, doc_name_filter: Optional[str] = None) -> Optional[str]:
+    import requests
+    try:
+        resp = requests.post(
+            f"{DATA_PLATFORM_URL}/api/v1/data/retrieve",
+            json={
+                "query": query,
+                "doc_name_filter": doc_name_filter,
+                "top_k": 6 if doc_name_filter else 10,
+                "top_n": 4 if doc_name_filter else 3
+            },
+            timeout=8
+        )
+        if resp.status_code == 200:
+            data = resp.json().get("data", {})
+            metrics = data.get("metrics", {})
+            cand_cnt = metrics.get("candidate_count", 0)
+            fin_cnt = metrics.get("final_count", 0)
+            top_sc = metrics.get("top1_score", 0.0)
+            print(f"  ⚡ [数据中台赋能] 成功通过 HTTP 接入数据中台 (Port 8001) 初筛:{cand_cnt} | 精排:{fin_cnt} | 最高分:{top_sc}")
+            return data.get("formatted_text")
+    except Exception:
+        pass
+    return None
+
+
 # Agent 循环治理参数：多跳题允许 8 次工具迭代；超过预算后强制进入证据合成阶段。
 AGENT_MAX_ITERATIONS = max(1, int(os.getenv("RAG_AGENT_MAX_ITERATIONS", "8")))
 AGENT_RECOVERY_CONTEXT_CHARS = max(2000, int(os.getenv("RAG_AGENT_RECOVERY_CONTEXT_CHARS", "12000")))
@@ -185,6 +214,12 @@ def search_knowledge_base(query: str, doc_name_filter: Optional[str] = None) -> 
     """
     from reranker import get_local_reranker, DEFAULT_DISTANCE_THRESHOLD, DEFAULT_RERANK_THRESHOLD
 
+    # 1. 优先通过 HTTP 远程调用独立数据中台微服务 (Port 8001)
+    remote_data = _call_data_platform_retrieve(query=query, doc_name_filter=doc_name_filter)
+    if remote_data is not None:
+        return remote_data
+
+    # 2. 本地回退降级保护 (当中台未单独启动时)
     filter_hint = f" (限定文档='{doc_name_filter}')" if doc_name_filter else " (全库跨文档检索)"
     vs = get_vector_store()
     top_k = 6 if doc_name_filter else 10
