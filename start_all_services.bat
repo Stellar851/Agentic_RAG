@@ -14,7 +14,7 @@ timeout /t 2 >nul
 start "Agent Service (8000)" cmd /k "%~dp0start_agent_service.bat"
 echo.
 echo ✅ 三大微服务窗口已全部拉起！
-echo 👉 业务智能体对话: http://localhost:8000/
-echo 👉 评测中台中枢看板: http://localhost:8002/
-echo 👉 数据中台接口文档: http://localhost:8001/docs
+echo 👉 业务智能体纯对话界面: http://127.0.0.1:8000/
+echo 👉 数据中台文档与切片管理: http://127.0.0.1:8001/
+echo 👉 评测中台五阶段评估中枢: http://127.0.0.1:8002/
 echo ======================================================================

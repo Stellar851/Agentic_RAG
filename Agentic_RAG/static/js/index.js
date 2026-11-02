@@ -39,26 +39,28 @@ let currentSessionId = null;
                 btnStop.addEventListener('click', stopCurrentGeneration);
             }
 
-            // 拖拽上传
-            dropzone.addEventListener('click', () => fileInput.click());
-            dropzone.addEventListener('dragover', (e) => {
-                e.preventDefault();
-                dropzone.classList.add('dragover');
-            });
-            dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
-            dropzone.addEventListener('drop', (e) => {
-                e.preventDefault();
-                dropzone.classList.remove('dragover');
-                if (e.dataTransfer.files.length > 0) {
-                    handleUpload(e.dataTransfer.files);
-                }
-            });
+            // 拖拽上传 (若存在相关 DOM)
+            if (dropzone && fileInput) {
+                dropzone.addEventListener('click', () => fileInput.click());
+                dropzone.addEventListener('dragover', (e) => {
+                    e.preventDefault();
+                    dropzone.classList.add('dragover');
+                });
+                dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+                dropzone.addEventListener('drop', (e) => {
+                    e.preventDefault();
+                    dropzone.classList.remove('dragover');
+                    if (e.dataTransfer.files.length > 0) {
+                        handleUpload(e.dataTransfer.files);
+                    }
+                });
 
-            fileInput.addEventListener('change', () => {
-                if (fileInput.files.length > 0) {
-                    handleUpload(fileInput.files);
-                }
-            });
+                fileInput.addEventListener('change', () => {
+                    if (fileInput.files.length > 0) {
+                        handleUpload(fileInput.files);
+                    }
+                });
+            }
 
             // 输入框事件
             userInput.addEventListener('keydown', (e) => {
@@ -389,6 +391,7 @@ let currentSessionId = null;
 
         // 3. 文档库管理
         async function fetchDocuments() {
+            if (!docsList) return;
             try {
                 const res = await fetch('/api/documents');
                 const result = await res.json();

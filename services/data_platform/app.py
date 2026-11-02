@@ -22,7 +22,8 @@ import traceback
 from typing import List, Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 # 确保导入同级微服务模块
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -52,6 +53,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 挂载静态资源与大屏控制台模板
+INDEX_HTML_PATH = os.path.join(CURRENT_DIR, "templates", "index.html")
+if os.path.isdir(os.path.join(CURRENT_DIR, "static")):
+    app.mount("/static", StaticFiles(directory=os.path.join(CURRENT_DIR, "static")), name="static")
+
+
+
+@app.get("/", response_class=HTMLResponse, summary="企业级数据中台专属资产管理大屏")
+async def root():
+    """渲染数据中台专属控制台大屏界面"""
+    if os.path.exists(INDEX_HTML_PATH):
+        with open(INDEX_HTML_PATH, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    return RedirectResponse(url="/docs")
 
 
 @app.get("/api/v1/data/health", summary="数据中台健康检查与资产摘要")
