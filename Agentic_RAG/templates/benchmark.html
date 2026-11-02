@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agentic RAG | 企业级评估监控中枢 (Enterprise Eval & Observability Center)</title>
+    <!-- Google Fonts 字体 -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <!-- Marked.js Markdown 渲染器 -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+        <!-- 工业级全流程评测中枢专属样式表 -->
+    <link rel="stylesheet" href="/static/css/benchmark.css?v=2.1">
+    <style>
+        .count-pill-btn {
+            background: transparent;
+            border: none;
+            color: #94a3b8;
+            padding: 3px 8px;
+            font-size: 0.76rem;
+            font-weight: 600;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        .count-pill-btn:hover {
+            color: #fff;
+            background: rgba(255, 255, 255, 0.08);
+        }
+        .count-pill-btn.active {
+            background: var(--primary, #6366f1) !important;
+            color: #fff !important;
+            box-shadow: 0 2px 8px rgba(99, 102, 241, 0.35);
+        }
+    </style>
+
+</head>
+
+<body>
+
+    <!-- 顶部企业级导航栏 -->
+    <header>
+        <div class="header-brand">
+            <div class="brand-badge-icon">🎯</div>
+            <div class="brand-text">
+                <h1>Agentic RAG 企业级评测与可观测性中枢</h1>
+                <p>
+                    <span class="live-pulse"></span>
+                    <span>Enterprise AI Evaluation & Observability Center</span>
+                    <span style="color: var(--border-subtle);">|</span>
+                    <span id="headerChunksBadge" style="color: var(--cyan);">知识库切片: 73 个</span>
+                </p>
+            </div>
+        </div>
+
+        <!-- 架构流向指示 -->
+        <div class="pipeline-strip">
+            <div class="pipeline-node">出题: <strong id="pipelineHeaderJudge">qwen3.8-max</strong></div>
+            <span class="pipeline-arrow">➔</span>
+            <div class="pipeline-node">作答: <strong id="pipelineHeaderAnswer">qwen3.8-flash</strong></div>
+            <span class="pipeline-arrow">➔</span>
+            <div class="pipeline-node" style="color: #38bdf8;">重排: <strong>gte-rerank-v2</strong></div>
+            <span class="pipeline-arrow">➔</span>
+            <div class="pipeline-node" style="color: var(--emerald);">裁判: <strong id="pipelineHeaderJudge2">qwen3.8-max</strong></div>
+        </div>
+
+        <!-- 顶部操作区 -->
+        <div class="header-actions">
+            <a href="/" class="btn-top btn-top-secondary">
+                <span>💬 返回智能问答</span>
+            </a>
+            <button class="btn-top btn-top-secondary" onclick="exportEvaluationExcel()" id="btnDownloadReportTop">
+                <span>📥 导出评测报表 (XLSX)</span>
+            </button>
+            <button class="btn-top btn-top-primary" onclick="runFullPipelineAutomated()" id="btnRunFullPipeline">
+                <span>⚡ 一键全自动化运行全量评测</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- 主工作区 -->
+    <main>
+
+        <!-- 企业级流水线选项卡导航 (Pipeline Stepper Tabs) -->
+        <div class="pipeline-stepper-wrap">
+            <div class="pipeline-stepper">
+                <button class="step-tab active" id="tabStep1" onclick="switchStep(1)">
+                    <div class="step-index-badge">1</div>
+                    <div class="step-tab-content">
+                        <div class="step-tab-title">知识库靶向出题</div>
+                        <div class="step-tab-desc" id="tabStep1Desc">qwen3.8-max 派生考题</div>
+                    </div>
+                </button>
+                <button class="step-tab" id="tabStep2" onclick="switchStep(2)">
+                    <div class="step-index-badge">2</div>
+                    <div class="step-tab-content">
+                        <div class="step-tab-title">评测题库标注</div>
+                        <div class="step-tab-desc">用例审查 / 编辑 / 导出</div>
+                    </div>
+                </button>
+                <button class="step-tab" id="tabStep3" onclick="switchStep(3)">
+                    <div class="step-index-badge">3</div>
+                    <div class="step-tab-content">
+                        <div class="step-tab-title">考生系统批量作答</div>
+                        <div class="step-tab-desc" id="tabStep3Desc">qwen3.8-flash + 百炼重排</div>
+                    </div>
+                </button>
+                <button class="step-tab" id="tabStep4" onclick="switchStep(4)">
+                    <div class="step-index-badge">4</div>
+                    <div class="step-tab-content">
+                        <div class="step-tab-title">Ragas 工业级量化裁判</div>
+                        <div class="step-tab-desc">原子陈述与去幻觉评估</div>
+                    </div>
+                </button>
+                <button class="step-tab" id="tabStep5" onclick="switchStep(5)">
+                    <div class="step-index-badge">5</div>
+                    <div class="step-tab-content">
+                        <div class="step-tab-title">全维透析与归因看板</div>
+                        <div class="step-tab-desc">诊断处方与单题 Trace 对比</div>
+                    </div>
+                </button>
+            </div>
+        </div>
+
+        <!-- 视图模式切换条 (分阶段聚焦 vs 全景流览) -->
+        <div class="view-mode-bar">
+            <div style="font-size: 0.82rem; color: var(--text-muted);">
+                <span>当前工作区模式: </span>
+                <strong id="currentWorkspaceText" style="color: #cbd5e1;">阶段聚焦模式 (Focus View)</strong>
+            </div>
+            <div class="mode-toggles">
+                <button class="mode-btn active" id="btnModeFocus" onclick="setViewMode('focus')">阶段聚焦</button>
+                <button class="mode-btn" id="btnModeAll" onclick="setViewMode('all')">全流水线全览</button>
+            </div>
+        </div>
+
+        <!-- =====================================================================
+             阶段一：智能命题控制台 (靶向出题)
+             ===================================================================== -->
+        <div class="stage-panel active" id="stagePanel1">
+            <section class="section-card">
+                <div class="section-header">
+                    <div class="section-title-wrap">
+                        <div class="section-icon-badge badge-step1">🤖</div>
+                        <div>
+                            <div class="section-title">阶段一：大模型自动化构建黄金测试集</div>
+                            <div class="section-subtitle">由 <strong>qwen3.8-max</strong> 担任出题专家，深度扫描真实已入库文档（<code>Agentic_RAG/uploads</code>），派生事实检索、多跳聚合、上下文精度与否定拒答全题型</div>
+                        </div>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                        <!-- 出题数量选择胶囊 -->
+                        <div class="case-count-selector" style="display: flex; align-items: center; background: rgba(255,255,255,0.04); border: 1px solid var(--border-subtle); border-radius: 10px; padding: 4px 6px; gap: 4px;">
+                            <span style="font-size: 0.78rem; color: #94a3b8; padding: 0 4px; display: flex; align-items: center; gap: 4px;">
+                                <span>🎯</span><strong>出题数量:</strong>
+                            </span>
+                            <button type="button" class="count-pill-btn" onclick="setGenerateCaseCount(5)" id="pillCount5">5题</button>
+                            <button type="button" class="count-pill-btn active" onclick="setGenerateCaseCount(10)" id="pillCount10">10题</button>
+                            <button type="button" class="count-pill-btn" onclick="setGenerateCaseCount(15)" id="pillCount15">15题</button>
+                            <button type="button" class="count-pill-btn" onclick="setGenerateCaseCount(20)" id="pillCount20">20题</button>
+                            <div style="display: flex; align-items: center; gap: 2px; margin-left: 2px;">
+                                <input type="number" id="customCaseCountInput" min="1" max="50" placeholder="自定" oninput="handleCustomCaseCountInput(this.value)" style="width: 52px; height: 25px; background: rgba(0,0,0,0.35); border: 1px solid var(--border-subtle); border-radius: 6px; color: #38bdf8; font-weight: 600; font-size: 0.75rem; text-align: center; padding: 0 2px; outline: none;">
+                                <span style="font-size: 0.75rem; color: var(--text-muted);">题</span>
+                            </div>
+                        </div>
+
+                        <div class="btn-group">
+                            <button class="action-btn btn-secondary" onclick="loadBuiltinGuideCases()" id="btnLoadGuide" title="从评测指南中装载指定数量的精编基准题">
+                                <span id="btnLoadGuideText">⚡ 载入基准 10 题</span>
+                            </button>
+                            <button class="action-btn btn-primary" onclick="startGenerateCases()" id="btnGenerateCases" title="由 qwen3.8-max 深入扫描知识库派生测试题">
+                                <span id="btnGenerateCasesText">🚀 仅基于知识库出 10 题 (qwen3.8-max)</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 真实出题文档源状态卡片 -->
+                <div style="background: rgba(255,255,255,0.02); border-radius: 12px; padding: 18px; border: 1px dashed var(--border-subtle); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px;">
+                    <div>
+                        <p style="font-size: 0.88rem; color: #cbd5e1; margin-bottom: 4px;">🎯 <strong>锁定真实知识库出题源</strong>：已绑定实际上传目录 <code>Agentic_RAG/uploads</code>（涵盖支付网关、订单架构、TiDB方案、考勤制度等）。</p>
+                        <p style="font-size: 0.78rem; color: var(--text-muted);">杜绝因文档缺失导致的“张冠李戴”虚假考题，保证每道测试题在知识库中均有章可循。</p>
+                    </div>
+                    <div style="display: flex; align-items: center; gap: 14px;">
+                        <span style="font-size: 0.85rem; color: var(--text-secondary);">当前题库就绪数: <strong id="totalCasesCountBadge" style="color: var(--primary-light); font-size: 1.25rem; font-family: 'JetBrains Mono', monospace;">0</strong> 题</span>
+                    </div>
+                </div>
+
+                <!-- 实时日志视窗 -->
+                <div class="terminal-log-box" id="generateLogBox">
+                    <div class="log-line-info">🤖 [准备就绪] 点击上方按钮启动 qwen3.8-max 出题任务...</div>
+                </div>
+            </section>
+        </div>
+
+        <!-- =====================================================================
+             阶段二：查看、修改与导出测试题 (用例审查)
+             ===================================================================== -->
+        <div class="stage-panel" id="stagePanel2">
+            <section class="section-card">
+                <div class="section-header">
+                    <div class="section-title-wrap">
+                        <div class="section-icon-badge badge-step2">📝</div>
+                        <div>
+                            <div class="section-title">阶段二：测试用例审核、在线标注与导出</div>
+                            <div class="section-subtitle">支持在页面中直接编辑问题描述、标准答案与审核状态，并一键持久化回写或导出为标准 <strong>.xlsx</strong> 审查表格</div>
+                        </div>
+                    </div>
+                    <div class="btn-group">
+                        <button class="action-btn btn-secondary" onclick="addNewEmptyCase()">
+                            <span>➕ 新增自定义考题</span>
+                        </button>
+                        <button class="action-btn btn-secondary" onclick="exportCasesExcel()" id="btnExportCases">
+                            <span>📥 导出测试题 (XLSX)</span>
+                        </button>
+                        <button class="action-btn btn-emerald" onclick="saveCasesToServer()" id="btnSaveCases">
+                            <span>💾 保存题库修改</span>
+                        </button>
+                        <button class="action-btn btn-primary" onclick="switchStep(3)">
+                            <span>进入阶段三：考生作答 ➔</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 题库表格容器 -->
+                <div class="table-wrap">
+                    <table class="bench-table" id="casesTable">
+                        <thead>
+                            <tr>
+                                <th style="width: 50px;">序号</th>
+                                <th style="width: 140px;">定向题型</th>
+                                <th style="min-width: 240px;">测试提问 (Query)</th>
+                                <th style="min-width: 280px;">黄金标准答案 (Ground Truth)</th>
+                                <th style="width: 140px;">来源文档</th>
+                                <th style="width: 110px;">审核状态</th>
+                                <th style="width: 80px;">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="casesTableBody">
+                            <tr>
+                                <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 40px;">
+                                    暂无测试用例，请在阶段一点击【极速载入精编基准 20 题】或【基于当前知识库出题】
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+
+        <!-- =====================================================================
+             阶段三：考生系统 (qwen3.7-plus) 批量作答
+             ===================================================================== -->
+        <div class="stage-panel" id="stagePanel3">
+            <section class="section-card">
+                <div class="section-header">
+                    <div class="section-title-wrap">
+                        <div class="section-icon-badge badge-step3">⚡</div>
+                        <div>
+                            <div class="section-title">阶段三：考生系统批量作答与客观凭据归档</div>
+                            <div class="section-subtitle">由 <strong id="stage3SubtitleModel">qwen3.8-flash</strong> 发起 Tool-Calling 知识库检索，经过<strong>阿里百炼 gte-rerank-v2</strong> 双层截断漏斗过滤后生成客观作答凭据</div>
+                        </div>
+                    </div>
+                    <div class="btn-group">
+                        <div style="display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,0.05); padding: 4px 10px; border-radius: 8px; font-size: 0.8rem;">
+                            <span style="color: var(--text-muted);">快速测试范围:</span>
+                            <button class="action-btn btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="selectLimit(3)" id="btnLimit3">前 3 题</button>
+                            <button class="action-btn btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="selectLimit(5)" id="btnLimit5">前 5 题</button>
+                            <button class="action-btn btn-secondary" style="padding: 4px 10px; font-size: 0.75rem; background: var(--primary); color:#fff;" onclick="selectLimit(0)" id="btnLimitAll">全部题目</button>
+                        </div>
+                        <button class="action-btn btn-primary" onclick="startRunAnswers()" id="btnRunAnswers"><span id="btnRunAnswersText">🚀 启动 qwen3.8-flash 批量并发作答</span></button>
+                    </div>
+                </div>
+
+                <!-- 双层漏斗截断配置说明卡片 -->
+                <div class="funnel-status-strip">
+                    <div class="funnel-step-item">
+                        <div class="funnel-step-icon" style="background: rgba(99,102,241,0.2); color: var(--primary-light);">1</div>
+                        <div>
+                            <div style="font-weight: 700; color: #fff;">第一层：初筛距离截断</div>
+                            <div style="color: var(--text-muted); font-size: 0.72rem;">Top-K: 10 | 欧氏距离 &le; 550.0（超标噪音切片直接斩断丢弃）</div>
+                        </div>
+                    </div>
+                    <div class="funnel-step-item">
+                        <div class="funnel-step-icon" style="background: rgba(16,185,129,0.2); color: var(--emerald);">2</div>
+                        <div>
+                            <div style="font-weight: 700; color: #fff;">第二层：百炼深度重排截断</div>
+                            <div style="color: var(--text-muted); font-size: 0.72rem;">Top-N: 3 | 得分 &ge; 0.40（切片全灭时触发诚实拒答凭据）</div>
+                        </div>
+                    </div>
+                    <div class="funnel-step-item">
+                        <div class="funnel-step-icon" style="background: rgba(6,182,212,0.2); color: var(--cyan);">☁️</div>
+                        <div>
+                            <div style="font-weight: 700; color: #38bdf8;">阿里百炼 gte-rerank-v2</div>
+                            <div style="color: var(--text-muted); font-size: 0.72rem;">云端毫秒级全交叉注意力打分 + 本地多轨容灾</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 作答控制台日志 -->
+                <div class="terminal-log-box" id="answersLogBox">
+                    <div class="log-line-info">📝 [准备就绪] 点击上方按钮启动 qwen3.7-plus 批量作答...</div>
+                </div>
+
+                <!-- 作答结果只读并列展示表格 -->
+                <div class="table-wrap" style="margin-top: 20px;">
+                    <table class="bench-table" id="answersTable">
+                        <thead>
+                            <tr>
+                                <th style="width: 50px;">序号</th>
+                                <th style="width: 140px;">定向题型</th>
+                                <th style="width: 25%;">测试提问 (Query)</th>
+                                <th style="width: 25%;">黄金标准答案 (Ground Truth)</th>
+                                <th style="width: 32%;">系统实际作答 (System Answer - 只读)</th>
+                                <th style="width: 80px;">切片数</th>
+                                <th style="width: 80px;">耗时</th>
+                            </tr>
+                        </thead>
+                        <tbody id="answersTableBody">
+                            <tr>
+                                <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 40px;">
+                                    作答结果尚未生成，请点击【启动 qwen3.7-plus 批量作答】
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+
+        <!-- =====================================================================
+             阶段四：裁判模型量化评估 (Ragas 评估)
+             ===================================================================== -->
+        <div class="stage-panel" id="stagePanel4">
+            <section class="section-card">
+                <div class="section-header">
+                    <div class="section-title-wrap">
+                        <div class="section-icon-badge badge-step4">⚖️</div>
+                        <div>
+                            <div class="section-title">阶段四：Ragas 工业级量化裁判评估</div>
+                            <div class="section-subtitle">由 <strong>qwen3.8-max</strong> 担任裁判，针对四大题型进行深层原子陈述检验，严密打分并输出溯源诊断与优化处方</div>
+                        </div>
+                    </div>
+                    <div class="btn-group">
+                        <button class="action-btn btn-primary" onclick="startJudgeEvaluation()" id="btnRunJudge">
+                            <span>🚀 启动 qwen3.8-max 裁判模型量化打分</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 裁判日志 -->
+                <div class="terminal-log-box" id="judgeLogBox">
+                    <div class="log-line-info">⚖️ [准备就绪] 作答凭据生成后，点击启动裁判打分...</div>
+                </div>
+            </section>
+        </div>
+
+        <!-- =====================================================================
+             阶段五：全维透析与归因看板 (Databricks / LangSmith 级看板)
+             ===================================================================== -->
+        <div class="stage-panel" id="stagePanel5">
+            <section class="section-card">
+                <div class="section-header">
+                    <div class="section-title-wrap">
+                        <div class="section-icon-badge badge-step5">📊</div>
+                        <div>
+                            <div class="section-title">阶段五：全维评估透视看板与系统诊断处方</div>
+                            <div class="section-subtitle">基于 Ragas Triad 评估标准，聚合通过率、忠实度、相关度、精度与召回率，支持单题全链路 Trace & Diff 下钻诊断</div>
+                        </div>
+                    </div>
+                    <div class="btn-group">
+                        <button class="action-btn btn-secondary" onclick="fetchLatestEvaluationReport()">
+                            <span>🔄 刷新最新评测报表</span>
+                        </button>
+                        <button class="action-btn btn-emerald" onclick="exportEvaluationExcel()">
+                            <span>📥 下载 21 列完整报告 (XLSX)</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 全链路系统级诊断横幅 -->
+                <div id="systemDiagBanner" style="display: none; margin-bottom: 22px;"></div>
+
+                <!-- Databricks / LangSmith 风格高维 KPI 仪表盘 -->
+                <div class="kpi-grid" id="kpiDashboard">
+                    <!-- Hero KPI: RAG Triad 综合得分 -->
+                    <div class="kpi-card hero-kpi">
+                        <div class="kpi-header">
+                            <span class="kpi-label">RAG Triad 综合得分</span>
+                            <span class="kpi-badge badge-triad" id="kpiTriadGrade">EXCELLENT</span>
+                        </div>
+                        <div class="kpi-value-row">
+                            <span class="kpi-number" id="kpiTriadScore">--</span>
+                            <span class="kpi-unit">/ 100 分</span>
+                        </div>
+                        <div class="kpi-progress-bar">
+                            <div class="kpi-progress-fill fill-primary" id="kpiTriadBar" style="width: 0%;"></div>
+                        </div>
+                        <div class="kpi-footer">
+                            <span>有效样本: <strong id="kpiValidCases">--</strong> / <strong id="kpiTotalCases">--</strong> 题</span>
+                            <span>有效通过率: <strong id="kpiValidPassRate" style="color: var(--emerald);">--%</strong></span>
+                            <span>官方通过率: <strong id="kpiPassRate">--%</strong></span>
+                        </div>
+                    </div>
+
+                    <!-- 维度 1: 忠实度 (去幻觉率) -->
+                    <div class="kpi-card">
+                        <div class="kpi-header">
+                            <span class="kpi-label">忠实度 (去幻觉)</span>
+                            <span class="kpi-badge badge-faith">Faithfulness</span>
+                        </div>
+                        <div class="kpi-value-row">
+                            <span class="kpi-number" id="kpiFaithScore">--</span>
+                            <span class="kpi-unit">%</span>
+                        </div>
+                        <div class="kpi-progress-bar">
+                            <div class="kpi-progress-fill fill-emerald" id="kpiFaithBar" style="width: 0%;"></div>
+                        </div>
+                        <div class="kpi-footer">
+                            <span>原子陈述事实符合率</span>
+                        </div>
+                    </div>
+
+                    <!-- 维度 2: 答案相关度 -->
+                    <div class="kpi-card">
+                        <div class="kpi-header">
+                            <span class="kpi-label">答案相关度</span>
+                            <span class="kpi-badge badge-rel">Relevance</span>
+                        </div>
+                        <div class="kpi-value-row">
+                            <span class="kpi-number" id="kpiRelScore">--</span>
+                            <span class="kpi-unit">%</span>
+                        </div>
+                        <div class="kpi-progress-bar">
+                            <div class="kpi-progress-fill fill-cyan" id="kpiRelBar" style="width: 0%;"></div>
+                        </div>
+                        <div class="kpi-footer">
+                            <span>用户提问意图聚焦度</span>
+                        </div>
+                    </div>
+
+                    <!-- 维度 3: 上下文精度 -->
+                    <div class="kpi-card">
+                        <div class="kpi-header">
+                            <span class="kpi-label">上下文精度</span>
+                            <span class="kpi-badge badge-prec">Precision</span>
+                        </div>
+                        <div class="kpi-value-row">
+                            <span class="kpi-number" id="kpiPrecScore">--</span>
+                            <span class="kpi-unit">%</span>
+                        </div>
+                        <div class="kpi-progress-bar">
+                            <div class="kpi-progress-fill fill-amber" id="kpiPrecBar" style="width: 0%;"></div>
+                        </div>
+                        <div class="kpi-footer">
+                            <span>黄金切片信噪比</span>
+                        </div>
+                    </div>
+
+                    <!-- 维度 4: 上下文召回率 -->
+                    <div class="kpi-card">
+                        <div class="kpi-header">
+                            <span class="kpi-label">上下文召回率</span>
+                            <span class="kpi-badge badge-rec">Recall</span>
+                        </div>
+                        <div class="kpi-value-row">
+                            <span class="kpi-number" id="kpiRecScore">--</span>
+                            <span class="kpi-unit">%</span>
+                        </div>
+                        <div class="kpi-progress-bar">
+                            <div class="kpi-progress-fill fill-purple" id="kpiRecBar" style="width: 0%;"></div>
+                        </div>
+                        <div class="kpi-footer">
+                            <span>关键业务条款捕获率</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 专业多维过滤器工具栏 -->
+                <div class="filter-toolbar">
+                    <div class="filter-left-group">
+                        <span style="font-size: 0.74rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase;">快速筛选:</span>
+                        <button class="filter-pill active" onclick="setJudgeStatusFilter('all')" id="filterStatusAll">全部用例 (<span id="filterCountAll">0</span>)</button>
+                        <button class="filter-pill fail-active" onclick="setJudgeStatusFilter('failed')" id="filterStatusFailed">仅看未通过 ❌ (<span id="filterCountFailed">0</span>)</button>
+                        <button class="filter-pill pass-active" onclick="setJudgeStatusFilter('passed')" id="filterStatusPassed">仅看已通过 ✅ (<span id="filterCountPassed">0</span>)</button>
+                        <button class="filter-pill" onclick="setJudgeStatusFilter('invalid')" id="filterStatusInvalid">仅看流程故障 ⚠️ (<span id="filterCountInvalid">0</span>)</button>
+                        
+                        <span style="color: var(--border-subtle); margin: 0 4px;">|</span>
+                        
+                        <button class="filter-pill" onclick="setJudgeCategoryFilter('all')" id="filterCatAll">全部题型</button>
+                        <button class="filter-pill" onclick="setJudgeCategoryFilter('事实检索')" id="filterCatFact">单跳检索</button>
+                        <button class="filter-pill" onclick="setJudgeCategoryFilter('多跳推理')" id="filterCatMulti">多跳推理</button>
+                        <button class="filter-pill" onclick="setJudgeCategoryFilter('精度')" id="filterCatPrec">上下文精度</button>
+                        <button class="filter-pill" onclick="setJudgeCategoryFilter('超纲')" id="filterCatRefusal">否定/超纲</button>
+                    </div>
+
+                    <div class="filter-right-group">
+                        <button class="filter-pill" onclick="toggleScoreSort()" id="btnSortScore">
+                            <span>分值排序: 默认</span>
+                        </button>
+                        <div class="search-input-box">
+                            <span class="search-icon">🔍</span>
+                            <input type="text" id="judgeSearchInput" placeholder="搜索问题或诊断关键词..." oninput="applyJudgeFilters()">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 评测结果高级列表 -->
+                <div class="table-wrap">
+                    <table class="bench-table" id="judgeTable">
+                        <thead>
+                            <tr>
+                                <th style="width: 50px;">序号</th>
+                                <th style="width: 130px;">题型</th>
+                                <th style="min-width: 260px;">测试提问与预期标准</th>
+                                <th style="width: 110px;">综合得分</th>
+                                <th style="min-width: 160px;">四维分值微型透视</th>
+                                <th style="width: 100px;">评测状态</th>
+                                <th style="min-width: 280px;">核心诊断意见</th>
+                                <th style="width: 110px; text-align: center;">溯源分析</th>
+                            </tr>
+                        </thead>
+                        <tbody id="judgeTableBody">
+                            <tr>
+                                <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 40px;">
+                                    评测报告尚未生成，请在阶段四运行量化评估或点击【刷新最新评测报表】
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+
+    </main>
+
+    <!-- =====================================================================
+         全屏沉浸式全链路单题溯源透视模态窗 (Trace & Diff Modal)
+         ===================================================================== -->
+    <div class="modal-overlay" id="traceModalOverlay" onclick="closeTraceModalOnBackdrop(event)">
+        <div class="modal-container">
+            <div class="modal-header">
+                <div class="modal-title-group">
+                    <span id="modalCaseTag" class="cat-tag cat-multi-hop">多跳推理型</span>
+                    <strong id="modalCaseTitle" style="font-size: 1.05rem; color: #fff;">用例全链路深度溯源透视</strong>
+                    <span id="modalScoreBadge" class="status-badge passed">100.00 分</span>
+                </div>
+                <button class="modal-close-btn" onclick="closeTraceModal()">✕</button>
+            </div>
+
+            <div class="modal-body">
+                <!-- 测试提问横幅 -->
+                <div style="background: rgba(255,255,255,0.03); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 14px 18px;">
+                    <div style="font-size: 0.74rem; color: var(--text-muted); font-weight: 700; text-transform: uppercase; margin-bottom: 4px;">测试提问 (Query)</div>
+                    <div id="modalQueryText" style="font-size: 0.94rem; color: #fff; font-weight: 600; line-height: 1.5;">--</div>
+                    <div style="display: flex; gap: 16px; margin-top: 8px; font-size: 0.74rem; color: var(--text-muted);">
+                        <span>来源文档: <strong id="modalSourceDoc" style="color: var(--cyan);">--</strong></span>
+                        <span>作答耗时: <strong id="modalQaLatency" style="color: #cbd5e1;">--s</strong></span>
+                        <span>裁判耗时: <strong id="modalJudgeLatency" style="color: #cbd5e1;">--s</strong></span>
+                    </div>
+                </div>
+
+                <!-- 左右对照：黄金标准答案 vs 实际生成答案 -->
+                <div class="diff-grid">
+                    <div class="diff-pane" style="border-left: 3px solid var(--primary);">
+                        <div class="diff-pane-header">
+                            <span style="color: var(--primary-light);">🎯 黄金标准答案 (Ground Truth)</span>
+                            <span style="font-size: 0.7rem; color: var(--text-muted);">专家审定业务凭据</span>
+                        </div>
+                        <div class="diff-content-text" id="modalExpectedAnswer">--</div>
+                    </div>
+
+                    <div class="diff-pane" id="actualAnswerPane" style="border-left: 3px solid var(--emerald);">
+                        <div class="diff-pane-header">
+                            <span style="color: var(--emerald);" id="modalActualAnswerHeader">🤖 系统实际回答 (qwen3.7-plus)</span>
+                            <span style="font-size: 0.7rem; color: var(--text-muted);">Tool-Calling + gte-rerank-v2</span>
+                        </div>
+                        <div class="diff-content-text" id="modalActualAnswer">--</div>
+                    </div>
+                </div>
+
+                <!-- 裁判模型思维链诊断依据 -->
+                <div class="diag-details-box">
+                    <div style="font-size: 0.78rem; font-weight: 700; color: #fb7185; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                        <span>⚖️ 裁判模型 (qwen3.8-max) 原子陈述检验与扣分原因</span>
+                    </div>
+                    <div id="modalDiagnosesList" style="font-size: 0.82rem; line-height: 1.6; color: #cbd5e1;">--</div>
+                </div>
+
+                <!-- 优化处方建议 -->
+                <div class="prescript-box">
+                    <div style="font-size: 0.78rem; font-weight: 700; color: var(--emerald); margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                        <span>💡 RAG 架构调优工程处方 (Prescriptions)</span>
+                    </div>
+                    <div id="modalPrescriptsList" style="font-size: 0.82rem; line-height: 1.6; color: #cbd5e1;">--</div>
+                </div>
+
+                <!-- 检索召回切片重排透视 -->
+                <div class="chunks-trace-box">
+                    <div style="font-size: 0.78rem; font-weight: 700; color: #38bdf8; margin-bottom: 4px; display: flex; justify-content: space-between; align-items: center;">
+                        <span>🔍 知识库命中切片与百炼 gte-rerank-v2 重排透视</span>
+                        <span id="modalChunksCountBadge" style="font-size: 0.72rem; color: var(--text-muted);">共 0 个切片</span>
+                    </div>
+                    <div id="modalChunksList">
+                        <div style="color: var(--text-muted); font-size: 0.78rem; padding: 10px 0;">该题目无召回切片（触发全量截断拒答）</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 吐司通知框 -->
+    <div class="toast" id="toastBox">通知内容</div>
+
+    <!-- JavaScript 交互脚本 -->
+        <!-- 工业级五阶段评测流水线核心脚本 -->
+    <script src="/static/js/benchmark.js?v=2.1"></script>
+
+</body>
+
+</html>

@@ -17,6 +17,7 @@ import os
 import sys
 import shutil
 import datetime
+import threading
 from typing import List, Dict, Any, Optional
 
 # 确保 Windows 终端输出 UTF-8 编码，防止 emoji 或特殊字符在 GBK 环境下抛出 UnicodeEncodeError
@@ -338,6 +339,96 @@ class VectorStoreManager:
         diag_info["char_count"] = len(raw_text)
         return diag_info
 
+    def check_document_duplicate(self, file_path: str, doc_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        【功能】极速前置查重：在不触发大模型清洗与架构图扫描前，快速判定文件是否已在知识库中存在
+        【算法】双指纹比对机制 (Dual-Fingerprint):
+               1. 计算原始正文指纹 raw_hash
+               2. 计算代码规则降噪指纹 cleaned_hash
+               3. 检索 ChromaDB 中是否存在任一匹配指纹 (100% 覆盖全部普通文档与包含框图文档)
+               4. 结合 doc_name 元数据快速反查，杜绝指纹漂移
+
+        【返回值】
+            若为重复文档：返回 dict（包含 is_duplicate=True, doc_name, duplicate_of, total_chunks, message 等）
+            若非重复文档：返回 None
+        """
+        if not os.path.exists(file_path):
+            return None
+
+        if not doc_name:
+            doc_name = os.path.basename(file_path)
+
+        try:
+            raw_text = DocumentParser.extract_raw_text(file_path)
+            if not raw_text or not raw_text.strip():
+                return None
+
+            import hashlib
+            raw_hash = hashlib.sha256(raw_text.strip().encode("utf-8")).hexdigest()
+            cleaned_text = DocumentParser.reform_complex_diagrams(raw_text, clean_mode="rule")
+            cleaned_hash = hashlib.sha256(cleaned_text.strip().encode("utf-8")).hexdigest()
+
+            # 1. 优先检索原始正文指纹 raw_hash
+            existing_matches = self.collection.get(
+                where={"content_hash": raw_hash},
+                include=["metadatas"]
+            )
+            matched_hash = raw_hash
+
+            # 2. 若未命中且存在规则清洗差异，检索规则降噪指纹 cleaned_hash
+            if (not existing_matches or not existing_matches.get("metadatas") or len(existing_matches["metadatas"]) == 0) and cleaned_hash != raw_hash:
+                existing_matches = self.collection.get(
+                    where={"content_hash": cleaned_hash},
+                    include=["metadatas"]
+                )
+                matched_hash = cleaned_hash
+
+            # 3. 亦可通过同名 doc_name 直接查询并核验库内指纹是否与当前文件的双指纹匹配
+            if not existing_matches or not existing_matches.get("metadatas") or len(existing_matches["metadatas"]) == 0:
+                name_matches = self.collection.get(
+                    where={"doc_name": doc_name},
+                    include=["metadatas"]
+                )
+                if name_matches and name_matches.get("metadatas") and len(name_matches["metadatas"]) > 0:
+                    db_h = name_matches["metadatas"][0].get("content_hash")
+                    if db_h in (raw_hash, cleaned_hash):
+                        existing_matches = name_matches
+                        matched_hash = db_h
+
+            if existing_matches and existing_matches.get("metadatas") and len(existing_matches["metadatas"]) > 0:
+                meta = existing_matches["metadatas"][0]
+                existing_doc_name = meta.get("doc_name", "")
+                total_chunks = meta.get("total_chunks", len(existing_matches["metadatas"]))
+                upload_time = meta.get("upload_time", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+                if existing_doc_name == doc_name:
+                    return {
+                        "doc_name": doc_name,
+                        "total_chunks": total_chunks,
+                        "char_count": len(raw_text),
+                        "upload_time": upload_time,
+                        "content_hash": matched_hash,
+                        "is_duplicate": True,
+                        "duplicate_of": doc_name,
+                        "message": f"文档【{doc_name}】在知识库中已存在且内容完全一致，已自动跳过重复入库"
+                    }
+                else:
+                    return {
+                        "doc_name": doc_name,
+                        "total_chunks": total_chunks,
+                        "char_count": len(raw_text),
+                        "upload_time": upload_time,
+                        "content_hash": matched_hash,
+                        "is_duplicate": True,
+                        "duplicate_of": existing_doc_name,
+                        "message": f"文件【{doc_name}】与已入库文档【{existing_doc_name}】内容完全一致，已自动跳过重复入库"
+                    }
+
+            return None
+        except Exception as e:
+            print(f"⚠️ [前置查重异常] 检查【{doc_name}】失败: {e}，降级走正常入库流程")
+            return None
+
     def process_and_add_document(
         self,
         file_path: str,
@@ -359,52 +450,26 @@ class VectorStoreManager:
         """
         doc_name = os.path.basename(file_path)
 
-        # 1. 文本提取与数据清洗
+        # 1. 【极速前置查重】避免任何不必要的数据清洗与分块向量计算开销
+        dup_info = self.check_document_duplicate(file_path, doc_name=doc_name)
+        if dup_info:
+            print(f"⚡ [极速秒级跳过] {dup_info['message']} (SHA-256: {dup_info['content_hash'][:8]}...)")
+            return dup_info
+
+        # 如果之前存在同名旧版本（说明内容已发生变更），先彻底清除旧切片再写入新版
+        self.delete_document(doc_name, delete_file=False)
+
+        # 2. 文本提取与数据清洗
         clean_desc = "大模型智能清洗 (Mermaid/Markdown升维)" if clean_mode == "llm" else "代码规则普通清洗 (正则降噪)"
         print(f"\n📂 [文档提取与清洗] 正在读取并处理文档: 【{doc_name}】 | 选定清洗模式: 【{clean_desc}】...")
         raw_text = DocumentParser.extract_text(file_path, clean_mode=clean_mode)
         if not raw_text.strip():
             raise ValueError(f"文档内容为空或未能解析出有效文本: {doc_name}")
 
-        # 计算文档正文的 SHA-256 内容指纹 (用于内容级防重)
         import hashlib
-        content_hash = hashlib.sha256(raw_text.strip().encode("utf-8")).hexdigest()
+        content_hash = hashlib.sha256(DocumentParser.extract_raw_text(file_path).strip().encode("utf-8")).hexdigest()
 
-        # 2. 内容哈希查重校验 (防同内容不同文件名、防相同文件重复计算)
-        existing_matches = self.collection.get(
-            where={"content_hash": content_hash},
-            include=["metadatas"]
-        )
-        if existing_matches and existing_matches.get("metadatas") and len(existing_matches["metadatas"]) > 0:
-            existing_doc_name = existing_matches["metadatas"][0].get("doc_name", "")
-            if existing_doc_name and existing_doc_name != doc_name:
-                print(f"⚠️ [内容哈希查重拦截] 文件【{doc_name}】与已入库文档【{existing_doc_name}】内容完全一致 (SHA-256: {content_hash[:8]}...)，跳过重复写入！")
-                return {
-                    "doc_name": doc_name,
-                    "total_chunks": 0,
-                    "char_count": len(raw_text),
-                    "upload_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "is_duplicate": True,
-                    "duplicate_of": existing_doc_name,
-                    "message": f"该文件内容与已入库文档【{existing_doc_name}】完全相同，已自动跳过重复入库"
-                }
-            elif existing_doc_name == doc_name:
-                total_c = existing_matches["metadatas"][0].get("total_chunks", len(existing_matches["metadatas"]))
-                print(f"ℹ️ [内容未变更] 文档【{doc_name}】内容与库内现有版本完全一致 (SHA-256: {content_hash[:8]}...)，无需重复计算向量。")
-                return {
-                    "doc_name": doc_name,
-                    "total_chunks": total_c,
-                    "char_count": len(raw_text),
-                    "upload_time": existing_matches["metadatas"][0].get("upload_time", datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
-                    "is_duplicate": True,
-                    "duplicate_of": doc_name,
-                    "message": f"文档【{doc_name}】内容未发生变更，复用现有知识库索引"
-                }
-
-        # 如果之前存在同名旧版本（内容已变更），先删除旧切片再写入新版
-        self.delete_document(doc_name, delete_file=False)
-
-        print(f"\n📄 [开始处理文档] 【{doc_name}】(有效字符: {len(raw_text)}, SHA-256: {content_hash[:8]}...)")
+        print(f"\n📄 [开始处理新文档] 【{doc_name}】(有效字符: {len(raw_text)}, SHA-256: {content_hash[:8]}...)")
 
         # 3. 递归字符分块
         text_splitter = RecursiveCharacterTextSplitter(
@@ -629,12 +694,15 @@ class VectorStoreManager:
             return False
 
 
-# 全局单例管理器（方便不同模块复用连接）
+# 全局单例管理器（线程安全双重检查锁）
 _global_vector_store: Optional[VectorStoreManager] = None
+_vector_store_lock = threading.Lock()
 
 def get_vector_store() -> VectorStoreManager:
-    """获取向量数据库管理器的全局单例实例"""
+    """获取向量数据库管理器的全局单例实例（线程安全）"""
     global _global_vector_store
     if _global_vector_store is None:
-        _global_vector_store = VectorStoreManager()
+        with _vector_store_lock:
+            if _global_vector_store is None:
+                _global_vector_store = VectorStoreManager()
     return _global_vector_store

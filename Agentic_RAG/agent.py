@@ -22,7 +22,12 @@ Agentic RAG 企业级智能关联知识库系统
 import os
 import sys
 import json
+import functools
+import re
 from typing import List, Dict, Any, Tuple, Optional
+
+# 确保所有 print 自动强制刷新
+print = functools.partial(print, flush=True)
 
 # 确保 Windows 终端输出 UTF-8 编码，防止 emoji 或特殊字符在 GBK 环境下抛出 UnicodeEncodeError
 if sys.platform.startswith("win"):
@@ -44,6 +49,94 @@ from langchain_core.messages import AIMessage, HumanMessage
 from models import get_deepseek_llm
 from vector_store import get_vector_store
 
+# Agent 循环治理参数：多跳题允许 8 次工具迭代；超过预算后强制进入证据合成阶段。
+AGENT_MAX_ITERATIONS = max(1, int(os.getenv("RAG_AGENT_MAX_ITERATIONS", "8")))
+AGENT_RECOVERY_CONTEXT_CHARS = max(2000, int(os.getenv("RAG_AGENT_RECOVERY_CONTEXT_CHARS", "12000")))
+AGENT_LLM_TIMEOUT_SECONDS = max(15, int(os.getenv("RAG_AGENT_LLM_TIMEOUT_SECONDS", "90")))
+AGENT_LLM_MAX_RETRIES = max(0, int(os.getenv("RAG_AGENT_LLM_MAX_RETRIES", "1")))
+AGENT_STOP_MARKERS = (
+    "agent stopped due to max iterations",
+    "agent stopped due to max iteration",
+    "agent stopped due to iteration limit",
+    "iteration limit or time limit",
+)
+
+
+def is_agent_stop_output(text: Any) -> bool:
+    """识别 LangChain Agent 因迭代上限返回的内部终止文案。"""
+    normalized = " ".join(str(text or "").lower().split())
+    return any(marker in normalized for marker in AGENT_STOP_MARKERS)
+
+
+def build_agent_failure_answer(contexts: Optional[List[str]] = None) -> str:
+    """生成不泄露内部异常、且明确说明证据不足的降级回答。"""
+    if contexts:
+        evidence = " ".join(str(c) for c in contexts[:2]).strip()
+        evidence = evidence[:360] + ("..." if len(evidence) > 360 else "")
+        return (
+            "系统未能在限定步骤内完成完整推理，因此当前无法给出可靠结论。"
+            "以下为已检索到的部分线索，仅供缩小问题范围后重试：\n\n"
+            f"{evidence}"
+        )
+    return "系统未能在限定步骤内完成检索与推理，当前无法给出可靠回答。请缩小问题范围后重试。"
+
+
+def _split_and_dedupe_contexts(contexts: Optional[List[str]]) -> List[str]:
+    """将工具观察结果拆成独立证据块并去重，避免同一长文本被重复计分。"""
+    collected: List[str] = []
+    seen = set()
+    for raw in contexts or []:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+
+        if "【来源 " in text:
+            parts = re.split(r"\n{2,}(?=【来源\s*\d+】)", text)
+        elif "--- [切片" in text:
+            parts = re.split(r"\n{0,2}(?=--- \[切片)", text)
+        else:
+            parts = [text]
+
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            if any(marker in part for marker in ("未能检索到", "未检索到任何", "未能初筛到")):
+                continue
+            fingerprint = re.sub(r"\s+", " ", part)
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            collected.append(part)
+    return collected
+
+
+def collect_agent_contexts(intermediate_steps: List[Any]) -> List[str]:
+    """从 Agent 工具轨迹中提取真实检索证据，供最终合成与 Ragas 评估复用。"""
+    observations = []
+    for step in intermediate_steps or []:
+        try:
+            action, observation = step
+        except (TypeError, ValueError):
+            continue
+        if getattr(action, "tool", "") in {"search_knowledge_base", "read_specific_document"}:
+            observations.append(str(observation or ""))
+    return _split_and_dedupe_contexts(observations)
+
+
+def _budget_contexts(contexts: List[str], total_chars: int = AGENT_RECOVERY_CONTEXT_CHARS) -> str:
+    """按证据块公平分配字符预算，优先保留多跳题中后段检索到的事实。"""
+    if not contexts:
+        return "【无可用证据】"
+    per_item = max(500, total_chars // min(len(contexts), 12))
+    selected = []
+    for index, context in enumerate(contexts[:12], 1):
+        clipped = context[:per_item]
+        if len(context) > per_item:
+            clipped += "..."
+        selected.append(f"【证据 {index}】\n{clipped}")
+    return "\n\n".join(selected)
+
 
 # ==============================================================================
 # 一、 智能体工具库 (Agent Tools)
@@ -53,11 +146,11 @@ from vector_store import get_vector_store
 def list_available_documents() -> str:
     """
     【工具功能】获取知识库中当前已上传的所有文档列表及简要统计信息。
-    
+
     【何时使用】
     当用户的问题比较宏观、涉及多个文档的对比、或者你想了解知识库涵盖哪些具体文档时，
     优先调用此工具，获取全部候选文档名称，以便制定精准的检索计划。
-    
+
     【返回值】
     JSON 格式的文档名称列表与切片数说明。
     """
@@ -80,31 +173,62 @@ def list_available_documents() -> str:
 @tool
 def search_knowledge_base(query: str, doc_name_filter: Optional[str] = None) -> str:
     """
-    【工具功能】在知识库中进行语义相似度向量检索，查找最相关的段落切片。
-    
+    【工具功能】在知识库中进行语义相似度向量检索，并经过本地双层阈值截断 (Top-K 初筛距离截断 + Top-N 重排得分截断)。
+
     【参数说明】
     - query: 检索查询词或自然语言问题。
     - doc_name_filter (可选): 如果你知道目标在某篇特定文档中，可传入文档名称（如 "用户手册.docx"），
       进行精确过滤检索；如果不传或为空，则在所有文档中跨文档全局检索。
-      
+
     【何时使用】
     寻找具体概念、段落、参数、关联依据或上下文事实时调用。支持多次针对不同关键词发起检索。
     """
-    filter_hint = f" | 限定文档='{doc_name_filter}'" if doc_name_filter else " | 全库检索"
-    print(f"\n🔎 [Agent 触发工具] search_knowledge_base: 检索词='{query}'{filter_hint}")
-    vs = get_vector_store()
-    top_k = 4 if doc_name_filter else 5
-    results = vs.query_similar_chunks(query=query, top_k=top_k, doc_name_filter=doc_name_filter)
+    from reranker import get_local_reranker, DEFAULT_DISTANCE_THRESHOLD, DEFAULT_RERANK_THRESHOLD
 
-    if not results:
+    filter_hint = f" (限定文档='{doc_name_filter}')" if doc_name_filter else " (全库跨文档检索)"
+    vs = get_vector_store()
+    top_k = 6 if doc_name_filter else 10
+    candidate_chunks = vs.query_similar_chunks(query=query, top_k=top_k, doc_name_filter=doc_name_filter)
+    print(f"  检索到: {len(candidate_chunks)} 个切片 (Chroma 向量初筛 距离 <= {DEFAULT_DISTANCE_THRESHOLD})")
+
+    if not candidate_chunks:
         target_desc = f"在文档【{doc_name_filter}】中" if doc_name_filter else "在全库中"
-        return f"{target_desc}未能检索到与 '{query}' 相关的片段，请尝试更换检索关键词或扩大检索范围。"
+        print(f"  重排为: 0 个切片 (未初筛到候选切片)")
+        return f"{target_desc}未能初筛到与 '{query}' 相关的片段，请尝试更换检索关键词或扩大检索范围。"
+
+    # 执行第二阶段：双层阈值截断漏斗 (第一层距离截断 + 第二层精排得分截断)
+    reranker = get_local_reranker()
+    top_n = 3 if not doc_name_filter else 4
+    rerank_res = reranker.rerank_and_filter(
+        query=query,
+        candidate_chunks=candidate_chunks,
+        top_k=top_k,
+        distance_threshold=DEFAULT_DISTANCE_THRESHOLD,
+        top_n=top_n,
+        rerank_threshold=DEFAULT_RERANK_THRESHOLD
+    )
+
+    final_chunks = rerank_res["final_chunks"]
+
+    # 若所有切片均未通过截断把关，触发标准诚实拒答凭据
+    if not final_chunks or rerank_res["is_all_refused"]:
+        target_desc = f"文档【{doc_name_filter}】" if doc_name_filter else "全量知识库"
+        print(f"  重排为: 0 个切片 (触发诚实拒答: 得分 < {DEFAULT_RERANK_THRESHOLD})")
+        return (
+            f"【权威核验结果】经系统两阶段高信噪比阈值过滤，{target_desc}中未检索到任何符合业务相关度标准的有效条款或段落。\n"
+            f"（所有候选切片距离均超过阈值 {DEFAULT_DISTANCE_THRESHOLD} 或语义重排得分低于 {DEFAULT_RERANK_THRESHOLD}）。\n"
+            f"请直接向用户诚实明确指出：当前知识库中未收录与 '{query}' 相关的内容或该业务未有明确规定，严禁主观凭空捏造答案。"
+        )
+
+    top1_score = final_chunks[0].get("rerank_score", "--") if final_chunks else "--"
+    print(f"  重排为: {len(final_chunks)} 个切片 (gte-rerank-v2 精排 最高得分 {top1_score})")
 
     formatted_snippets = []
-    for i, r in enumerate(results, 1):
+    for i, r in enumerate(final_chunks, 1):
+        score_info = f" | 重排得分: {r.get('rerank_score', '--')}" if "rerank_score" in r else ""
         formatted_snippets.append(
             f"【来源 {i}】文档: 《{r['doc_name']}》 (切片 {r['chunk_index'] + 1}/{r['total_chunks']})\n"
-            f"相关度距离: {r['distance']}\n"
+            f"相关度距离: {r['distance']}{score_info}\n"
             f"内容片段:\n{r['text']}\n"
             f"----------------------------------------"
         )
@@ -115,11 +239,11 @@ def search_knowledge_base(query: str, doc_name_filter: Optional[str] = None) -> 
 def read_specific_document(doc_name: str, max_chunks: int = 6) -> str:
     """
     【工具功能】连续精读指定文档的上下文片段。
-    
+
     【参数说明】
     - doc_name: 文档的完整名称 (例如 '系统架构设计说明书.docx')。
     - max_chunks: 顺序读取的切片数，默认 6 个切片。
-    
+
     【何时使用】
     当向量检索到的片段太碎片化，或者文档结构严密（如章节条款连续叙述）、
     需要通读某篇核心文档的整体脉络时调用。
@@ -156,7 +280,12 @@ AGENT_SYSTEM_PROMPT = """你是一个企业级智能知识库首席分析专家�
    - 在多轮连续对话中，用户提问往往包含代词、比较或省略主语（例如“它有哪些模块？”、“与方案A相比呢？”、“这个怎么配置？”）。
    - 你必须结合之前的对话历史，精准识别用户所指代的具体实体、方案或文档。
    - 在调用 `search_knowledge_base` 等工具时，**【绝对禁止】直接拿模糊代词（如“它”、“这个”）作为查询词检索**！你必须自主将检索词改写为包含具体实体全称的明确独立查询词（例如：上一轮在聊“网关系统”，用户追问“它的端口是多少”时，你应使用 `search_knowledge_base(query='网关系统 端口号 配置')` 发起检索）。
-5. **规范的回答结构**：
+5. **检索预算与证据收敛**：
+   - 用户点名了具体文档时，优先调用 `search_knowledge_base(..., doc_name_filter="完整文档名")`，不要先做全库泛化检索。
+   - 同一问题不要重复执行相同检索；通常 2~4 次定向检索足够，原则上不要超过 4 次工具调用。
+   - 一旦已获得回答所必需的核心证据，立即停止检索并作答，切勿为了“更完整”无限追加工具调用。
+   - 如果证据不足，明确列出缺失点并基于已知内容回答，不得暴露 `Agent stopped due to max iterations` 等内部状态。
+6. **规范的回答结构**：
    - **核心结论**：开门见山给出回答的主旨。
    - **关联分析/详细阐述**：分条理展开，清晰点出各个文档之间的逻辑链条（如：“依据《文档A》，...；同时《文档B》指出...”）。
    - **参考来源**：在末尾明确列出参考了哪些文档及相应章节/片段。
@@ -177,8 +306,10 @@ class AgenticRAGService:
     def __init__(self):
         """初始化底层基础工具与提示词模板，执行器按需懒加载并缓存"""
         self.tools = AGENT_TOOLS
-        # 缓存不同模型名称对应的 AgentExecutor 实例
-        self._executors = {}
+        # 缓存不同模型名称对应的 Agent Runnable 实例 (不可变线程安全)
+        self._agents = {}
+        # 迭代预算耗尽后的最终答案合成器按模型复用
+        self._recovery_llms = {}
 
         # 构造对话 Prompt 模板
         self.prompt = ChatPromptTemplate.from_messages([
@@ -188,35 +319,86 @@ class AgenticRAGService:
             MessagesPlaceholder(variable_name="agent_scratchpad"),
         ])
 
-    def _get_executor(self, model_name: Optional[str] = None) -> Tuple[AgentExecutor, str]:
+    def _get_executor(self, model_name: Optional[str] = None, verbose: bool = False) -> Tuple[AgentExecutor, str]:
         """
-        根据指定模型名称获取或创建 AgentExecutor
+        根据指定模型名称获取线程安全的 AgentExecutor 实例
+        底层复用不可变 Agent Runnable，顶层创建独立轻量级 AgentExecutor，确保多线程并发安全。
         """
         from models import ACTIVE_LLM_MODEL
         actual_model = model_name.strip() if model_name and model_name.strip() else ACTIVE_LLM_MODEL
-        
-        if actual_model not in self._executors:
-            print(f"\n🔄 [Agent 初始化执行器] 正在为模型【{actual_model}】构建专属 Tool-Calling AgentExecutor...")
-            llm = get_deepseek_llm(model=actual_model, temperature=0.2, streaming=True)
+
+        if actual_model not in self._agents:
+            llm = get_deepseek_llm(
+                model=actual_model,
+                temperature=0.2,
+                streaming=False,
+                timeout=AGENT_LLM_TIMEOUT_SECONDS,
+                max_retries=AGENT_LLM_MAX_RETRIES
+            )
             agent = create_tool_calling_agent(
                 llm=llm,
                 tools=self.tools,
                 prompt=self.prompt
             )
-            executor = AgentExecutor(
-                agent=agent,
-                tools=self.tools,
-                verbose=True,
-                return_intermediate_steps=True,
-                max_iterations=8,  # 最多允许 8 次工具调用循环，足以完成深度多跳关联
-                early_stopping_method="generate"
+            self._agents[actual_model] = agent
+
+        agent = self._agents[actual_model]
+        executor = AgentExecutor(
+            agent=agent,
+            tools=self.tools,
+            verbose=verbose,
+            return_intermediate_steps=True,
+            max_iterations=AGENT_MAX_ITERATIONS,
+            early_stopping_method="generate"
+        )
+        return executor, actual_model
+
+    def _recover_answer_from_contexts(
+        self,
+        user_query: str,
+        contexts: List[str],
+        actual_model: str
+    ) -> Optional[str]:
+        """工具预算耗尽后，基于已召回证据执行一次无工具最终合成。"""
+        if not contexts:
+            return None
+        if actual_model not in self._recovery_llms:
+            self._recovery_llms[actual_model] = get_deepseek_llm(
+                model=actual_model,
+                temperature=0.1,
+                streaming=False,
+                timeout=AGENT_LLM_TIMEOUT_SECONDS,
+                max_retries=AGENT_LLM_MAX_RETRIES
             )
-            self._executors[actual_model] = executor
-            print(f"✅ [Agent 执行器就绪] 模型【{actual_model}】执行器已缓存构建完成。")
+        llm = self._recovery_llms[actual_model]
+        evidence = _budget_contexts(contexts)
+        prompt = f"""你是企业知识库的最终答案合成器。工具调用预算已经耗尽，禁止再请求任何工具。
+请严格依据下方已检索证据回答用户问题。
 
-        return self._executors[actual_model], actual_model
+要求：
+1. 直接回答问题；用户指定了格式、项数或禁用内容时，必须严格遵守。
+2. 只使用证据中明确出现的事实、数字、名称和条款，不得补写证据未支持的信息。
+3. 多个证据冲突时，优先采用正文条款；无法判断时明确指出冲突。
+4. 证据不足时，先给出能够确认的结论，再明确列出缺失信息，严禁编造。
+5. 不要提及迭代次数、内部工具、系统错误或“无法继续调用工具”。
 
-    def ask(self, user_query: str, chat_history: Optional[List[Dict[str, str]]] = None, model_name: Optional[str] = None) -> Dict[str, Any]:
+【用户问题】
+{user_query}
+
+【已检索证据】
+{evidence}
+"""
+        try:
+            response = llm.invoke(prompt)
+            answer = response.content.strip() if hasattr(response, "content") else str(response).strip()
+        except Exception as exc:
+            print(f"  ⚠ 证据合成失败，使用本地降级回答: {str(exc)[:100]}")
+            return None
+        if not answer or is_agent_stop_output(answer):
+            return None
+        return answer
+
+    def ask(self, user_query: str, chat_history: Optional[List[Dict[str, str]]] = None, model_name: Optional[str] = None, verbose: bool = False) -> Dict[str, Any]:
         """
         【功能】接收用户提问，执行多跳 Agentic 检索与推理，返回结构化答案与思考证据链
 
@@ -246,7 +428,7 @@ class AgenticRAGService:
 
         # 2. 调用 Agent 执行推理
         try:
-            executor, actual_model = self._get_executor(model_name)
+            executor, actual_model = self._get_executor(model_name, verbose=verbose)
             result = executor.invoke({
                 "input": user_query,
                 "chat_history": formatted_history
@@ -290,25 +472,64 @@ class AgenticRAGService:
             valid_existing_docs = {d["doc_name"] for d in vs.list_all_documents()}
             filtered_docs = {d for d in referenced_docs if d in valid_existing_docs}
 
+            # 拆分并去重证据块，避免同一条长检索结果被重复送入裁判。
+            contexts_collected = collect_agent_contexts(intermediate_steps)
+
+            degraded = False
+            recovered_from = None
+            if is_agent_stop_output(answer_text):
+                recovered = self._recover_answer_from_contexts(
+                    user_query=user_query,
+                    contexts=contexts_collected,
+                    actual_model=actual_model
+                )
+                answer_text = recovered or build_agent_failure_answer(contexts_collected)
+                degraded = True
+                recovered_from = "agent_max_iterations"
+
             return {
                 "answer": answer_text,
                 "steps": steps_trace,
                 "referenced_docs": sorted(list(filtered_docs)),
+                "contexts": contexts_collected,
                 "model_name": actual_model,
-                "success": True
+                "success": True,
+                "degraded": degraded,
+                "recovered_from": recovered_from,
+                "error_stage": None,
+                "error_type": None,
+                "retry_recommended": False
             }
 
         except Exception as e:
-            import traceback
-            error_msg = f"Agent 推理执行异常: {str(e)}"
-            print(error_msg)
-            traceback.print_exc()
+            err_str = str(e)
+            if "quota" in err_str.lower() or "403" in err_str:
+                short_err = "阿里百炼 API 免费额度已耗尽 (Free quota exhausted，请检查账号余额或 API Key)"
+            elif "401" in err_str or "invalid_api_key" in err_str.lower():
+                short_err = "阿里百炼 API Key 无效或未正确配置"
+            elif "11434" in err_str or "ollama" in err_str.lower():
+                short_err = "Ollama 本地服务未运行或连接超时 (http://localhost:11434)"
+            else:
+                short_err = f"{err_str[:120]}"
+            print(f"  ❌ 作答异常: {short_err}")
+            if "quota" in err_str.lower() or "403" in err_str:
+                error_type = "agent_quota"
+            elif "401" in err_str or "invalid_api_key" in err_str.lower():
+                error_type = "agent_auth"
+            elif "11434" in err_str or "ollama" in err_str.lower():
+                error_type = "agent_embedding_unavailable"
+            else:
+                error_type = "agent_exception"
             return {
-                "answer": f"抱歉，在调用智能体检索知识库时发生错误：{str(e)}。请确保大模型 API 密钥配置正确，且 Ollama 本地服务处于运行中。",
+                "answer": f"抱歉，系统作答遇到异常：{short_err}",
                 "steps": [],
                 "referenced_docs": [],
+                "contexts": [],
                 "model_name": model_name or "unknown",
-                "success": False
+                "success": False,
+                "error_stage": "agent",
+                "error_type": error_type,
+                "retry_recommended": True
             }
 
     def ask_stream(self, user_query: str, chat_history: Optional[List[Dict[str, str]]] = None, model_name: Optional[str] = None):
@@ -407,6 +628,19 @@ class AgenticRAGService:
                 vs = get_vector_store()
                 valid_existing_docs = {d["doc_name"] for d in vs.list_all_documents()}
                 filtered_docs = {d for d in referenced_docs if d in valid_existing_docs}
+                contexts_collected = collect_agent_contexts(intermediate_steps)
+
+                degraded = False
+                recovered_from = None
+                if is_agent_stop_output(answer_text):
+                    recovered = self._recover_answer_from_contexts(
+                        user_query=user_query,
+                        contexts=contexts_collected,
+                        actual_model=actual_model
+                    )
+                    answer_text = recovered or build_agent_failure_answer(contexts_collected)
+                    degraded = True
+                    recovered_from = "agent_max_iterations"
 
                 event_queue.put({
                     "event": "done",
@@ -414,8 +648,11 @@ class AgenticRAGService:
                         "answer": answer_text,
                         "steps": steps_trace,
                         "referenced_docs": sorted(list(filtered_docs)),
+                        "contexts": contexts_collected,
                         "model_name": actual_model,
-                        "success": True
+                        "success": True,
+                        "degraded": degraded,
+                        "recovered_from": recovered_from
                     }
                 })
             except Exception as e:
@@ -423,7 +660,12 @@ class AgenticRAGService:
                 traceback.print_exc()
                 event_queue.put({
                     "event": "error",
-                    "data": {"message": f"Agent 执行异常: {str(e)}"}
+                    "data": {
+                        "message": f"Agent 执行异常: {str(e)}",
+                        "error_stage": "agent",
+                        "error_type": "agent_exception",
+                        "retry_recommended": True
+                    }
                 })
             finally:
                 event_queue.put(None)
