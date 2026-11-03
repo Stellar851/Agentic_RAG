@@ -287,10 +287,21 @@ async def _call_agent_http(query: str, model_name: str, agent_url: str = DEFAULT
             if resp.status_code == 200:
                 payload = resp.json()
                 data = payload.get("data", {})
+                contexts = data.get("contexts", [])
+                steps = data.get("steps", [])
+                # 智能兜底：若 contexts 为空，尝试从 steps 的 observation 中提取真实切片正文
+                if not contexts and steps:
+                    for s in steps:
+                        obs = s.get("observation") or s.get("observation_preview") or ""
+                        if obs and ("【切片" in obs or "【来源" in obs or "=== 正在精读" in obs):
+                            contexts.append(obs)
+                if not contexts:
+                    contexts = data.get("referenced_docs", [])
+
                 return {
                     "answer": data.get("answer", ""),
-                    "contexts": data.get("referenced_docs", []),
-                    "steps": data.get("steps", []),
+                    "contexts": contexts,
+                    "steps": steps,
                     "success": True,
                     "error_type": None
                 }

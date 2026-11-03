@@ -222,6 +222,7 @@ async def chat(req: ChatRequest):
                     "answer": answer,
                     "steps": steps,
                     "referenced_docs": referenced_docs,
+                    "contexts": result.get("contexts", []),
                     "model_name": model_used,
                     "is_new_session": is_new_session
                 }
