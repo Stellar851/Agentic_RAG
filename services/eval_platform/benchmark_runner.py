@@ -341,7 +341,7 @@ def build_benchmark_summary(
     case_results: List[Dict[str, Any]],
     model_b: str,
     model_c: str,
-    total_elapsed: float,
+    total_elapsed: float = 0.0,
     max_workers: Optional[int] = None
 ) -> Dict[str, Any]:
     """汇总评测结果，将质量失败与流程故障严格分离。"""

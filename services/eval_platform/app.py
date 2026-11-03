@@ -415,6 +415,7 @@ async def run_benchmark_judge_stream(req: BenchmarkRunJudgeRequest):
     print(f"\n[评测 4/5] 独立客观裁判打分 | 题目 {total} | 裁判模型 {model_c}")
 
     async def event_generator():
+        t_start = time.time()
         sem = asyncio.Semaphore(concurrency_limit)
         queue = asyncio.Queue()
 
@@ -475,7 +476,13 @@ async def run_benchmark_judge_stream(req: BenchmarkRunJudgeRequest):
 
         await asyncio.gather(*tasks)
 
-        summary = build_benchmark_summary(all_evaluated, model_b=ALI_DEFAULT_ANSWER_MODEL, model_c=model_c)
+        total_elapsed = round(time.time() - t_start, 2)
+        summary = build_benchmark_summary(
+            case_results=all_evaluated,
+            model_b=ALI_DEFAULT_ANSWER_MODEL,
+            model_c=model_c,
+            total_elapsed=total_elapsed
+        )
         with open(LATEST_REPORT_JSON, "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
 
