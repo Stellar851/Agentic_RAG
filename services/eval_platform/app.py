@@ -278,7 +278,7 @@ def _prepare_target_cases(limit: Optional[int]) -> List[Dict[str, Any]]:
 
 async def _call_agent_http(query: str, model_name: str, agent_url: str = DEFAULT_AGENT_CHAT_URL) -> Dict[str, Any]:
     """通过 HTTP 协议向 Agent 服务发送提问 (解耦微服务)"""
-    async with httpx.AsyncClient(timeout=90.0) as client:
+    async with httpx.AsyncClient(timeout=180.0) as client:
         try:
             resp = await client.post(
                 agent_url,
@@ -310,9 +310,18 @@ async def _call_agent_http(query: str, model_name: str, agent_url: str = DEFAULT
                 "success": False,
                 "error_type": "agent_connection_error"
             }
-        except Exception as e:
+        except httpx.TimeoutException as e:
             return {
-                "answer": f"调用 Agent 异常: {str(e)}",
+                "answer": f"调用 Agent 超时 (超过 180s 限制): {type(e).__name__}",
+                "contexts": [],
+                "steps": [],
+                "success": False,
+                "error_type": "agent_timeout"
+            }
+        except Exception as e:
+            err_detail = f"{type(e).__name__}: {str(e)}" if str(e) else type(e).__name__
+            return {
+                "answer": f"调用 Agent 异常: {err_detail}",
                 "contexts": [],
                 "steps": [],
                 "success": False,
@@ -325,7 +334,7 @@ async def run_benchmark_answers_stream(req: BenchmarkRunAnswersRequest):
     target_cases = _prepare_target_cases(req.limit)
     model_b = req.model_b or ALI_DEFAULT_ANSWER_MODEL
     total = len(target_cases)
-    concurrency_limit = 4
+    concurrency_limit = 2
 
     print(f"\n[评测 3/5] 批量作答 | 题目 {total} | 考生模型 {model_b} | 并发 {concurrency_limit}")
 
@@ -486,6 +495,14 @@ async def run_benchmark_judge_stream(req: BenchmarkRunJudgeRequest):
         with open(LATEST_REPORT_JSON, "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
 
+        # 阶段四完成时自动编译生成 21 列综合指标 Excel 权威报表，保证磁盘与前端永远实时同步
+        try:
+            excel_report_path = os.path.join(BENCHMARK_DIR, "基准评测集_带量化指标.xlsx")
+            export_evaluation_report(summary, excel_report_path)
+            print(f"📊 [自动报表同步] 阶段四评测打分结束，已自动编译最新报表: {excel_report_path}")
+        except Exception as ex:
+            print(f"⚠️ [自动报表同步失败]: {ex}")
+
         out_summary = {"summary": summary, **summary}
         yield f"event: all_done\ndata: {json.dumps(out_summary, ensure_ascii=False)}\n\n"
 
@@ -501,14 +518,14 @@ async def run_benchmark_judge_stream(req: BenchmarkRunJudgeRequest):
 # ==============================================================================
 
 @app.post("/api/benchmark/sync-export", summary="阶段五：即时写盘防丢与 Excel 报表编译")
+@app.post("/api/benchmark/sync-and-export", summary="阶段五：即时写盘防丢与 Excel 报表编译 (前端兼容别名)")
 async def sync_export_benchmark(req: SyncExportRequest):
     summary = req.summary
     with open(LATEST_REPORT_JSON, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
 
     excel_report_path = os.path.join(BENCHMARK_DIR, "基准评测集_带量化指标.xlsx")
-    cases = summary.get("case_results", [])
-    export_evaluation_report(cases, summary, excel_report_path)
+    export_evaluation_report(summary, excel_report_path)
 
     return {
         "code": 200,
