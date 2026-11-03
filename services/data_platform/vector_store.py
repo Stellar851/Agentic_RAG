@@ -43,17 +43,14 @@ from models import get_ollama_embeddings, get_deepseek_llm, DEEPSEEK_DEFAULT_MOD
 # 一、 目录与常量定义
 # ==============================================================================
 
-# 当前项目根目录与全工程共享资产路径
+# 当前微服务本地持久化资产路径 (纯数据中台内部收敛)
 BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT: str = os.path.dirname(os.path.dirname(BASE_DIR))
-DEFAULT_SHARED_UPLOAD_DIR: str = os.path.join(PROJECT_ROOT, "Agentic_RAG", "uploads")
-DEFAULT_SHARED_CHROMA_DIR: str = os.path.join(PROJECT_ROOT, "Agentic_RAG", "chroma_db")
 
-# 上传原始文件存储路径 (优先使用环境变量，次之共享已有知识库，再次之本地子目录)
-UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", DEFAULT_SHARED_UPLOAD_DIR if os.path.exists(DEFAULT_SHARED_UPLOAD_DIR) else os.path.join(BASE_DIR, "uploads"))
+# 上传原始文件存储路径 (默认收敛至数据中台本地 uploads)
+UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", os.path.join(BASE_DIR, "uploads"))
 
-# ChromaDB 向量数据持久化路径
-CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR", DEFAULT_SHARED_CHROMA_DIR if os.path.exists(DEFAULT_SHARED_CHROMA_DIR) else os.path.join(BASE_DIR, "chroma_db"))
+# ChromaDB 向量数据持久化路径 (默认收敛至数据中台本地 chroma_db)
+CHROMA_PERSIST_DIR: str = os.getenv("CHROMA_PERSIST_DIR", os.path.join(BASE_DIR, "chroma_db"))
 
 # ChromaDB 统一知识库 Collection 名称
 COLLECTION_NAME: str = "agentic_knowledge_base"
