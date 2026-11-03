@@ -423,5 +423,6 @@ if __name__ == "__main__":
     print("📍 监听地址: http://0.0.0.0:8001")
     print("📚 文档存储: " + UPLOAD_DIR)
     print("🗄️  向量存储: " + CHROMA_PERSIST_DIR)
+    print("💡 提示: 当前仅启动了[数据中台]。如需一键启动全套集群(包括8000业务Agent)，请在根目录下执行: python app.py")
     print("=" * 70 + "\n")
     uvicorn.run("app:app", host="0.0.0.0", port=8001, reload=False)

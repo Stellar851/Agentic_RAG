@@ -458,7 +458,7 @@
                         pBar.style.width = '100%';
                         pPct.textContent = '100%';
                         pTxt.innerHTML = `<span>🎉 全量 ${d.total} 道题目作答完成！真实切片证据已存证。</span>`;
-                        answeredCases = d.data;
+                        answeredCases = d.data || d.cases || (Array.isArray(d) ? d : answeredCases);
                         try { localStorage.setItem('benchmark_answered_cases', JSON.stringify(answeredCases)); } catch (e) {}
                         renderAnswersTable();
                         showToast(`完成 ${answeredCases.length} 道测试题的客观作答！`);
@@ -525,6 +525,10 @@
         // 阶段四：裁判模型量化打分 (SSE 实时流式增量推流)
         // =====================================================================
         async function startJudgeEvaluation() {
+            if (!answeredCases || answeredCases.length === 0) {
+                // 自愈尝试：自动拉取最新的考生作答记录快照
+                await fetchLatestAnsweredCases();
+            }
             if (!answeredCases || answeredCases.length === 0) {
                 alert('请先完成阶段三的考生系统作答，生成客观凭据后再启动裁判！');
                 switchStep(3);
@@ -594,11 +598,13 @@
                     all_done: (d) => {
                         pBar.style.width = '100%';
                         pPct.textContent = '100%';
-                        latestJudgeReport = d.summary;
+                        latestJudgeReport = d.summary || d;
                         try { localStorage.setItem('benchmark_latest_judge_report', JSON.stringify(latestJudgeReport)); } catch (e) {}
                         const validPassRate = latestJudgeReport.valid_pass_rate ?? latestJudgeReport.pass_rate ?? 0;
                         const invalidCount = latestJudgeReport.invalid_cases || 0;
-                        pTxt.innerHTML = `<span>评测完成！有效通过率: ${(validPassRate * 100).toFixed(1)}% | 有效综合分: ${(latestJudgeReport.average_scores.rag_triad_score * 100).toFixed(1)}分 | 流程故障: ${invalidCount} 题</span>`;
+                        const avgScores = latestJudgeReport.average_scores || {};
+                        const triadScore = avgScores.rag_triad_score || 0;
+                        pTxt.innerHTML = `<span>评测完成！有效通过率: ${(validPassRate * 100).toFixed(1)}% | 有效综合分: ${(triadScore * 100).toFixed(1)}分 | 流程故障: ${invalidCount} 题</span>`;
                         renderJudgeDashboard(latestJudgeReport);
                         showToast('评测打分完成，正在呈现全景诊断看板');
                         setTimeout(() => { switchStep(5); }, 1200);

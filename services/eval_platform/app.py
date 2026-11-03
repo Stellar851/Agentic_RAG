@@ -132,6 +132,24 @@ async def get_latest_eval_report():
         return JSONResponse(status_code=500, content={"code": 500, "message": str(e)})
 
 
+@app.get("/api/benchmark/latest-answers", summary="获取最新考生作答记录快照")
+@app.get("/api/eval/latest-answers", summary="获取最新考生作答记录快照 (兼容路由)")
+async def get_latest_answered_cases():
+    if not os.path.exists(LATEST_ANSWERS_JSON):
+        return {"code": 404, "message": "尚未执行过考生作答，暂无作答记录"}
+    try:
+        with open(LATEST_ANSWERS_JSON, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        for item in data:
+            if "system_answer" not in item:
+                item["system_answer"] = item.get("answer", "")
+            if "contexts_count" not in item:
+                item["contexts_count"] = len(item.get("contexts", []))
+        return {"code": 200, "data": data}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"code": 500, "message": str(e)})
+
+
 @app.get("/api/benchmark/config", summary="获取评测中枢动态模型配置")
 async def get_benchmark_config():
     return {
@@ -354,9 +372,18 @@ async def run_benchmark_answers_stream(req: BenchmarkRunAnswersRequest):
             if ev_type == "progress":
                 yield f"event: progress\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
             elif ev_type == "done_item":
+                payload["system_answer"] = payload.get("answer", "")
+                payload["contexts_count"] = len(payload.get("contexts", []))
                 all_results.append(payload)
                 completed_count += 1
-                yield f"event: answer_item\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                frame_data = {
+                    "current": completed_count,
+                    "total": total,
+                    "case": payload,
+                    "item": payload
+                }
+                yield f"event: case_done\ndata: {json.dumps(frame_data, ensure_ascii=False)}\n\n"
+                yield f"event: answer_item\ndata: {json.dumps(frame_data, ensure_ascii=False)}\n\n"
 
         await asyncio.gather(*tasks)
 
@@ -364,7 +391,7 @@ async def run_benchmark_answers_stream(req: BenchmarkRunAnswersRequest):
         with open(LATEST_ANSWERS_JSON, "w", encoding="utf-8") as f:
             json.dump(all_results, f, ensure_ascii=False, indent=2)
 
-        yield f"event: all_done\ndata: {json.dumps({'total': total, 'success_count': len(all_results)}, ensure_ascii=False)}\n\n"
+        yield f"event: all_done\ndata: {json.dumps({'total': total, 'success_count': len(all_results), 'data': all_results}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -437,7 +464,14 @@ async def run_benchmark_judge_stream(req: BenchmarkRunJudgeRequest):
             elif ev_type == "done_item":
                 all_evaluated.append(payload)
                 completed_count += 1
-                yield f"event: judge_item\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                frame_data = {
+                    "current": completed_count,
+                    "total": total,
+                    "case": payload,
+                    "item": payload
+                }
+                yield f"event: case_done\ndata: {json.dumps(frame_data, ensure_ascii=False)}\n\n"
+                yield f"event: judge_item\ndata: {json.dumps(frame_data, ensure_ascii=False)}\n\n"
 
         await asyncio.gather(*tasks)
 
@@ -445,7 +479,8 @@ async def run_benchmark_judge_stream(req: BenchmarkRunJudgeRequest):
         with open(LATEST_REPORT_JSON, "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2)
 
-        yield f"event: all_done\ndata: {json.dumps(summary, ensure_ascii=False)}\n\n"
+        out_summary = {"summary": summary, **summary}
+        yield f"event: all_done\ndata: {json.dumps(out_summary, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_generator(),
