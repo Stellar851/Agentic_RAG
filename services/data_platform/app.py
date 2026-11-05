@@ -27,12 +27,16 @@ from fastapi.staticfiles import StaticFiles
 
 # 确保导入同级微服务模块
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(os.path.dirname(CURRENT_DIR))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from vector_store import get_vector_store, UPLOAD_DIR, CHROMA_PERSIST_DIR
 from reranker import get_local_reranker, DEFAULT_DISTANCE_THRESHOLD, DEFAULT_RERANK_THRESHOLD
 from chat_history_db import get_data_chat_db
+from common.logging_config import configure_logging, get_logger, install_trace_middleware
 from schemas import (
     SessionCreateRequest,
     SessionTitleUpdateRequest,
@@ -42,6 +46,9 @@ from schemas import (
     ConfirmUploadRequest,
     CancelUploadRequest
 )
+
+configure_logging("data-platform")
+logger = get_logger("data_platform.app")
 
 app = FastAPI(
     title="企业级统一数据中台微服务 (Data Platform)",
@@ -58,10 +65,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+install_trace_middleware(
+    app,
+    "data-platform",
+    silence_prefixes=["/api/v1/data/health", "/api/v1/data/documents"],
+)
+
 # 挂载静态资源与大屏控制台模板
 INDEX_HTML_PATH = os.path.join(CURRENT_DIR, "templates", "index.html")
 if os.path.isdir(os.path.join(CURRENT_DIR, "static")):
     app.mount("/static", StaticFiles(directory=os.path.join(CURRENT_DIR, "static")), name="static")
+
+# 挂载 Model Context Protocol (MCP) 工业标准服务端 (基于 SSE 传输协议)
+from mcp_server import mcp_server
+app.mount("/mcp", mcp_server.sse_app())
 
 
 
@@ -95,7 +112,14 @@ async def health_check():
                 "total_messages": mem_stats["total_messages"],
                 "upload_dir": UPLOAD_DIR,
                 "chroma_dir": CHROMA_PERSIST_DIR,
-                "documents": [d.get("doc_name") for d in all_docs]
+                "documents": [d.get("doc_name") for d in all_docs],
+                "mcp_protocol": {
+                    "enabled": True,
+                    "version": "2.x",
+                    "sse_endpoint": "http://127.0.0.1:8001/mcp/sse",
+                    "tools": ["search_knowledge_base", "read_specific_document"],
+                    "resources": ["kb://documents"]
+                }
             }
         }
     except Exception as e:
