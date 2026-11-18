@@ -10,7 +10,7 @@
         // =====================================================================
         let benchmarkConfig = {
             answer_model: 'qwen3.8-flash',
-            judge_model: 'qwen3.8-max',
+            judge_model: 'qwen3.8-max-0902',
             rerank_model: 'gte-rerank-v2',
             embedding_model: 'bge-m3'
         };
@@ -99,7 +99,7 @@
                 btnGuideText.textContent = `⚡ 载入基准 ${generateCaseCount} 题`;
             }
             if (btnGenText) {
-                const answerModel = (typeof cachedConfig !== 'undefined' && cachedConfig && cachedConfig.judge_model) ? cachedConfig.judge_model : 'qwen3.8-max';
+                const answerModel = (typeof cachedConfig !== 'undefined' && cachedConfig && cachedConfig.judge_model) ? cachedConfig.judge_model : 'qwen3.8-max-0902';
                 btnGenText.textContent = `🚀 仅基于知识库出 ${generateCaseCount} 题 (${answerModel})`;
             }
         }
@@ -225,14 +225,14 @@
             const btn = document.getElementById('btnGenerateCases');
             const logBox = document.getElementById('generateLogBox');
             btn.disabled = true;
-            logBox.innerHTML = '<div class="log-line-info">🤖 正在调用 qwen3.8-max 深入扫描已入库真实业务文档并自动派生定向题库...</div>';
+            logBox.innerHTML = '<div class="log-line-info">🤖 正在调用 qwen3.8-max-0902 深入扫描已入库真实业务文档并自动派生定向题库...</div>';
             logBox.innerHTML += '<div class="log-line-warn">⏳ 覆盖单跳检索、多跳推理、上下文精度及否定超纲四大矩阵，预计耗时 15~35 秒...</div>';
 
             try {
                 const res = await fetch('/api/benchmark/generate-cases', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ mode: 'from-docs', model_a: (typeof cachedConfig !== 'undefined' && cachedConfig && cachedConfig.judge_model) ? cachedConfig.judge_model : 'qwen3.8-max', case_count: generateCaseCount })
+                    body: JSON.stringify({ mode: 'from-docs', model_a: (typeof cachedConfig !== 'undefined' && cachedConfig && cachedConfig.judge_model) ? cachedConfig.judge_model : 'qwen3.8-max-0902', case_count: generateCaseCount })
                 });
                 const data = await res.json();
                 if (data.code === 200) {
@@ -542,7 +542,7 @@
             logBox.innerHTML = `
                 <div class="progress-bar-wrap">
                     <div class="progress-bar-head">
-                        <span id="judgeProgressText">⚖️ 裁判模型 (qwen3.8-max) 启动！针对每道题进行深层原子陈述检验...</span>
+                        <span id="judgeProgressText">⚖️ 裁判模型 (qwen3.8-max-0902) 启动！针对每道题进行深层原子陈述检验...</span>
                         <span id="judgeProgressPercent" class="progress-badge">0%</span>
                     </div>
                     <div class="progress-bar-track">
@@ -560,7 +560,7 @@
             try {
                 await streamSSEPost('/api/benchmark/run-judge-stream', {
                     answered_cases: answeredCases,
-                    model_c: benchmarkConfig.judge_model || 'qwen3.8-max'
+                    model_c: benchmarkConfig.judge_model || 'qwen3.8-max-0902'
                 }, {
                     progress: (d) => {
                         const pct = Math.round(((d.current - 0.5) / d.total) * 100);

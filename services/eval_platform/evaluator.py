@@ -121,9 +121,9 @@ class RagasEvaluator:
 
     def __init__(self, model_name: Optional[str] = None):
         """
-        初始化评估引擎，配置专用的评估裁判大模型（按用户指定统一选用通义千问旗舰 qwen3.8-max 独立裁判）
+        初始化评估引擎，配置专用的评估裁判大模型（按用户指定统一选用通义千问旗舰 qwen3.8-max-0902 独立裁判）
         """
-        self.model_name = (model_name or "").strip() or "qwen3.8-max"
+        self.model_name = (model_name or "").strip() or "qwen3.8-max-0902"
         # 兼容旧配置中的 glm-5.3（自动平滑对齐至 deepseek-v4-pro-0813）
         if self.model_name in ["glm-5.3", "glm5.3", "glm"]:
             self.model_name = "deepseek-v4-pro-0813"

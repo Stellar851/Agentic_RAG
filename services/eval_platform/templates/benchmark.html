@@ -57,13 +57,13 @@
 
         <!-- 架构流向指示 -->
         <div class="pipeline-strip">
-            <div class="pipeline-node">出题: <strong id="pipelineHeaderJudge">qwen3.8-max</strong></div>
+            <div class="pipeline-node">出题: <strong id="pipelineHeaderJudge">qwen3.8-max-0902</strong></div>
             <span class="pipeline-arrow">➔</span>
             <div class="pipeline-node">作答: <strong id="pipelineHeaderAnswer">qwen3.8-flash</strong></div>
             <span class="pipeline-arrow">➔</span>
             <div class="pipeline-node" style="color: #38bdf8;">重排: <strong>gte-rerank-v2</strong></div>
             <span class="pipeline-arrow">➔</span>
-            <div class="pipeline-node" style="color: var(--emerald);">裁判: <strong id="pipelineHeaderJudge2">qwen3.8-max</strong></div>
+            <div class="pipeline-node" style="color: var(--emerald);">裁判: <strong id="pipelineHeaderJudge2">qwen3.8-max-0902</strong></div>
         </div>
 
         <!-- 顶部操作区 -->
@@ -90,7 +90,7 @@
                     <div class="step-index-badge">1</div>
                     <div class="step-tab-content">
                         <div class="step-tab-title">知识库靶向出题</div>
-                        <div class="step-tab-desc" id="tabStep1Desc">qwen3.8-max 派生考题</div>
+                        <div class="step-tab-desc" id="tabStep1Desc">qwen3.8-max-0902 派生考题</div>
                     </div>
                 </button>
                 <button class="step-tab" id="tabStep2" onclick="switchStep(2)">
@@ -146,7 +146,7 @@
                         <div class="section-icon-badge badge-step1">🤖</div>
                         <div>
                             <div class="section-title">阶段一：大模型自动化构建黄金测试集</div>
-                            <div class="section-subtitle">由 <strong>qwen3.8-max</strong> 担任出题专家，深度扫描真实已入库文档（<code>Agentic_RAG/uploads</code>），派生事实检索、多跳聚合、上下文精度与否定拒答全题型</div>
+                            <div class="section-subtitle">由 <strong>qwen3.8-max-0902</strong> 担任出题专家，深度扫描真实已入库文档（<code>Agentic_RAG/uploads</code>），派生事实检索、多跳聚合、上下文精度与否定拒答全题型</div>
                         </div>
                     </div>
                     <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
@@ -169,8 +169,8 @@
                             <button class="action-btn btn-secondary" onclick="loadBuiltinGuideCases()" id="btnLoadGuide" title="从评测指南中装载指定数量的精编基准题">
                                 <span id="btnLoadGuideText">⚡ 载入基准 10 题</span>
                             </button>
-                            <button class="action-btn btn-primary" onclick="startGenerateCases()" id="btnGenerateCases" title="由 qwen3.8-max 深入扫描知识库派生测试题">
-                                <span id="btnGenerateCasesText">🚀 仅基于知识库出 10 题 (qwen3.8-max)</span>
+                            <button class="action-btn btn-primary" onclick="startGenerateCases()" id="btnGenerateCases" title="由 qwen3.8-max-0902 深入扫描知识库派生测试题">
+                                <span id="btnGenerateCasesText">🚀 仅基于知识库出 10 题 (qwen3.8-max-0902)</span>
                             </button>
                         </div>
                     </div>
@@ -189,7 +189,7 @@
 
                 <!-- 实时日志视窗 -->
                 <div class="terminal-log-box" id="generateLogBox">
-                    <div class="log-line-info">🤖 [准备就绪] 点击上方按钮启动 qwen3.8-max 出题任务...</div>
+                    <div class="log-line-info">🤖 [准备就绪] 点击上方按钮启动 qwen3.8-max-0902 出题任务...</div>
                 </div>
             </section>
         </div>
@@ -339,12 +339,12 @@
                         <div class="section-icon-badge badge-step4">⚖️</div>
                         <div>
                             <div class="section-title">阶段四：Ragas 工业级量化裁判评估</div>
-                            <div class="section-subtitle">由 <strong>qwen3.8-max</strong> 担任裁判，针对四大题型进行深层原子陈述检验，严密打分并输出溯源诊断与优化处方</div>
+                            <div class="section-subtitle">由 <strong>qwen3.8-max-0902</strong> 担任裁判，针对四大题型进行深层原子陈述检验，严密打分并输出溯源诊断与优化处方</div>
                         </div>
                     </div>
                     <div class="btn-group">
                         <button class="action-btn btn-primary" onclick="startJudgeEvaluation()" id="btnRunJudge">
-                            <span>🚀 启动 qwen3.8-max 裁判模型量化打分</span>
+                            <span>🚀 启动 qwen3.8-max-0902 裁判模型量化打分</span>
                         </button>
                     </div>
                 </div>
@@ -583,7 +583,7 @@
                 <!-- 裁判模型思维链诊断依据 -->
                 <div class="diag-details-box">
                     <div style="font-size: 0.78rem; font-weight: 700; color: #fb7185; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
-                        <span>⚖️ 裁判模型 (qwen3.8-max) 原子陈述检验与扣分原因</span>
+                        <span>⚖️ 裁判模型 (qwen3.8-max-0902) 原子陈述检验与扣分原因</span>
                     </div>
                     <div id="modalDiagnosesList" style="font-size: 0.82rem; line-height: 1.6; color: #cbd5e1;">--</div>
                 </div>

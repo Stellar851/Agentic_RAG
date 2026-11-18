@@ -52,7 +52,7 @@ class ChatRequest(BaseModel):
 class BenchmarkGenerateRequest(BaseModel):
     """阶段一：知识库出题请求体"""
     mode: Optional[str] = Field("from-guide", description="模式：from-guide 或 generate")
-    model_a: Optional[str] = Field("qwen3.8-max", description="命题专家模型名称（必须为阿里百炼顶级逻辑旗舰 qwen3.8-max）")
+    model_a: Optional[str] = Field("qwen3.8-max-0902", description="命题专家模型名称（必须为阿里百炼顶级逻辑旗舰 qwen3.8-max-0902）")
     case_count: Optional[int] = Field(10, description="需要出题/加载的题目数量，如 5, 10, 20 等")
 
 
@@ -70,7 +70,7 @@ class BenchmarkRunAnswersRequest(BaseModel):
 class BenchmarkRunJudgeRequest(BaseModel):
     """阶段四：裁判深度量化评分请求体"""
     answered_cases: List[Dict[str, Any]] = Field(..., description="已生成答案的测试用例列表")
-    model_c: Optional[str] = Field("qwen3.8-max", description="裁判评测模型（必须为阿里百炼顶级逻辑旗舰 qwen3.8-max）")
+    model_c: Optional[str] = Field("qwen3.8-max-0902", description="裁判评测模型（必须为阿里百炼顶级逻辑旗舰 qwen3.8-max-0902）")
 
 
 class SyncExportRequest(BaseModel):

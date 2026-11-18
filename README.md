@@ -26,15 +26,15 @@ flowchart TD
     end
 
     subgraph 3. 工业级五阶段评测流水线
-        P1[阶段一: 命题专家 qwen3.8-max 靶向出题] --> P2[阶段二: 待审核测试集审题与导出]
+        P1[阶段一: 命题专家 qwen3.8-max-0902 靶向出题] --> P2[阶段二: 待审核测试集审题与导出]
         P2 --> P3[阶段三: 考生系统 qwen3.7-plus 批量作答与快照持久化]
-        P3 --> P4[阶段四: 裁判模型 qwen3.8-max 深度原子反思与 Ragas 量化打分]
+        P3 --> P4[阶段四: 裁判模型 qwen3.8-max-0902 深度原子反思与 Ragas 量化打分]
         P4 --> P5[阶段五: 全维看板 + 21列带量化指标 Excel 报表编译同步]
     end
 ```
 
 ### 🛡️ 核心模型分工体系（严禁混淆）
-1. **出题专家 & 独立反思裁判**：严格且仅使用 **`qwen3.8-max`**（阿里百炼旗舰顶级逻辑模型，具备超强长文本推理与反思纠错能力）；
+1. **出题专家 & 独立反思裁判**：严格且仅使用 **`qwen3.8-max-0902`**（阿里百炼旗舰顶级逻辑模型，具备超强长文本推理与反思纠错能力）；
 2. **考生系统客观作答**：严格使用 **`qwen3.7-plus`**（阿里百炼主力问答模型，兼顾响应速度与上下文拟合）；
 3. **语义精排重排引擎**：统一接入阿里百炼官方云端 Cross-Attention 模型 **`gte-rerank-v2`**（双层阈值过滤，免下载本地大权重，零显存占用）；
 4. **向量嵌入初筛**：本地 Ollama **`bge-m3`**（1024 维 Dense 稠密向量，覆盖多语言与长切片）。
@@ -63,9 +63,9 @@ E:\RAG_project\
 │   ├── agent.py                # 智能体中枢 (ReAct 循环、多跳工具调用、检索漏斗调度、流式推流)
 │   ├── reranker.py             # 语义重排引擎 (阿里百炼 gte-rerank-v2 跨注意力打分与双层过滤漏斗)
 │   ├── vector_store.py         # 向量知识库中枢 (文档解析切分、bge-m3 入库与 ChromaDB 管理)
-│   ├── evaluator.py            # Ragas 工业级量化评估中枢 (qwen3.8-max 忠实度/相关度原子反思打分)
+│   ├── evaluator.py            # Ragas 工业级量化评估中枢 (qwen3.8-max-0902 忠实度/相关度原子反思打分)
 │   ├── benchmark_runner.py     # 评测流水线编译引擎 (生成 21 列题目明细与 Sheet 2 KPI 仪表盘报表)
-│   ├── dataset_generator.py    # 黄金测试集派生引擎 (qwen3.8-max 深入知识库真实文档扫描派生考题)
+│   ├── dataset_generator.py    # 黄金测试集派生引擎 (qwen3.8-max-0902 深入知识库真实文档扫描派生考题)
 │   ├── chat_history_db.py      # 对话历史持久化操作类 (SQLite 增删查改、会话生命周期管理)
 │   ├── chat_history.db         # SQLite 数据库物理实体 (真实持久化用户多轮会话记录)
 │   ├── requirements.txt        # 经典 Python 核心依赖清单 (供传统 pip 部署参考)
@@ -90,10 +90,10 @@ E:\RAG_project\
 │   │       └── benchmark.js    # 评测工作台交互逻辑 (五阶段切换、双轨自愈、裁判执行、即时同步写盘)
 │   │
 │   ├── benchmarks/             # 评测体系持久化产物目录
-│   │   ├── 待审核基准测试集.xlsx # 命题专家 (qwen3.8-max) 派生出的待审黄金考题库 (Excel 格式)
+│   │   ├── 待审核基准测试集.xlsx # 命题专家 (qwen3.8-max-0902) 派生出的待审黄金考题库 (Excel 格式)
 │   │   ├── 待审核基准测试集.json # 待审黄金考题库镜像 (JSON 格式)
 │   │   ├── 最新作答记录.json     # 考生系统 (qwen3.7-plus) 批量检索作答快照凭据 (断点防丢)
-│   │   ├── 最新评测报告.json     # 裁判模型 (qwen3.8-max) 深度反思打分汇总与 KPI 看板快照
+│   │   ├── 最新评测报告.json     # 裁判模型 (qwen3.8-max-0902) 深度反思打分汇总与 KPI 看板快照
 │   │   └── 基准评测集_带量化指标.xlsx # 包含 21 列综合指标明细与 Sheet 2 仪表盘的权威 Excel 报表
 │   │
 │   ├── chroma_db/              # ChromaDB 本地向量集合物理存储目录
@@ -110,14 +110,14 @@ E:\RAG_project\
 | 核心文件 | 所属分层 | 业务定位与核心职能 |
 | :--- | :--- | :--- |
 | **`app.py`** | Web 接入层 | **服务总入口**：集成 FastAPI、配置 CORS 跨域、挂载静态资源 `/static`、挂载 4 大子路由、提供 `/` 与 `/benchmark` 页面渲染。 |
-| **`models.py`** | 统一模型网关 | **模型配置中心与工厂**：统一收口 `get_llm()`、`get_judge_llm()` (锁定 `qwen3.8-max`)、`get_answer_llm()` (锁定 `qwen3.7-plus`)、`get_embeddings()` (本地 `bge-m3`) 与 `get_reranker()` (`gte-rerank-v2`)，支持无感多模型热切换。 |
+| **`models.py`** | 统一模型网关 | **模型配置中心与工厂**：统一收口 `get_llm()`、`get_judge_llm()` (锁定 `qwen3.8-max-0902`)、`get_answer_llm()` (锁定 `qwen3.7-plus`)、`get_embeddings()` (本地 `bge-m3`) 与 `get_reranker()` (`gte-rerank-v2`)，支持无感多模型热切换。 |
 | **`schemas.py`** | 数据契约层 | **请求/响应规范**：声明 `ChatRequest`、`BenchmarkRunAnswersRequest`、`BenchmarkRunJudgeRequest`、`SyncExportRequest` 等 Pydantic 数据规范，彻底杜绝循环依赖。 |
 | **`agent.py`** | 智能体中枢 | **多跳推理与调度**：实现 LangChain Tool-Calling 智能体、ReAct 思考循环、两阶段漏斗消费、诚实拒答判定及卡片式三步日志输出。 |
 | **`reranker.py`** | 算法精排层 | **Cross-Attention 深度重排**：直连阿里百炼云端 `gte-rerank-v2`，计算 Query 与上下文切片的交叉注意力得分，实现得分 $\ge 0.40$ 的硬性截断。 |
 | **`vector_store.py`** | 知识库存储层 | **文档切分与向量检索**：支持 PDF/Word/PPT/TXT/MD 多格式解析与图表预检，按语义切块并通过本地 Ollama `bge-m3` 执行欧氏距离 $\le 550.0$ 向量初筛。 |
-| **`evaluator.py`** | 量化评测裁判 | **Ragas 工业打分引擎**：驱动 `qwen3.8-max` 针对四大题型进行忠实度（去幻觉）、答案相关度、上下文精度与召回率的深度反思打分与处方诊断。 |
+| **`evaluator.py`** | 量化评测裁判 | **Ragas 工业打分引擎**：驱动 `qwen3.8-max-0902` 针对四大题型进行忠实度（去幻觉）、答案相关度、上下文精度与召回率的深度反思打分与处方诊断。 |
 | **`benchmark_runner.py`** | 报表生成引擎 | **21 列 Excel 编译**：将评测结果编译为具备专业配色与样式的标准 Excel 报表，包含 Sheet 1（21 列明细）与 Sheet 2（全维 KPI 看板）。 |
-| **`dataset_generator.py`** | 考题派生引擎 | **黄金测试集生成**：让 `qwen3.8-max` 靶向扫描入库文档，自动构建涵盖客观事实、跨文档多跳、参数对比与超纲题型的考题矩阵。 |
+| **`dataset_generator.py`** | 考题派生引擎 | **黄金测试集生成**：让 `qwen3.8-max-0902` 靶向扫描入库文档，自动构建涵盖客观事实、跨文档多跳、参数对比与超纲题型的考题矩阵。 |
 | **`chat_history_db.py`** | 历史持久化层 | **会话管理**：基于 SQLite 实现多会话隔离、会话重命名、历史上下文拉取与物理清理。 |
 
 ---
@@ -233,8 +233,8 @@ uv run uvicorn app:app --app-dir Agentic_RAG --host 0.0.0.0 --port 5000
 # 模式 A：从内置精选指南直接快速装载生成待审核基准测试集
 uv run python Agentic_RAG/dataset_generator.py --mode from-guide
 
-# 模式 B：调用 qwen3.8-max 深入知识库真实文档扫描派生考题
-uv run python Agentic_RAG/dataset_generator.py --mode generate --model-a qwen3.8-max --workers 2
+# 模式 B：调用 qwen3.8-max-0902 深入知识库真实文档扫描派生考题
+uv run python Agentic_RAG/dataset_generator.py --mode generate --model-a qwen3.8-max-0902 --workers 2
 
 # 指定自定义输出 Excel 路径
 uv run python Agentic_RAG/dataset_generator.py --output Agentic_RAG/benchmarks/待审核基准测试集.xlsx
@@ -248,8 +248,8 @@ uv run python Agentic_RAG/dataset_generator.py --output Agentic_RAG/benchmarks/�
 # 1. 快速抽样评测（评测前 3 道题目）
 uv run python Agentic_RAG/benchmark_runner.py --limit 3
 
-# 2. 标准批量评测（指定模型：qwen3.7-plus 作答 + qwen3.8-max 裁判，运行前 5 道题）
-uv run python Agentic_RAG/benchmark_runner.py --limit 5 --model-b qwen3.7-plus --model-c qwen3.8-max
+# 2. 标准批量评测（指定模型：qwen3.7-plus 作答 + qwen3.8-max-0902 裁判，运行前 5 道题）
+uv run python Agentic_RAG/benchmark_runner.py --limit 5 --model-b qwen3.7-plus --model-c qwen3.8-max-0902
 
 # 3. 全量运行整套基准题库
 uv run python Agentic_RAG/benchmark_runner.py --limit 0

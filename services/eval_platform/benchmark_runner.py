@@ -4,10 +4,10 @@ Agentic RAG 企业级智能关联知识库系统
 自动化基准评测运行器 (benchmark_runner.py)
 
 【三模型评测流水线核心执行模块】
-- 模型 A (qwen3.8-max)       : [前序阶段] 派生高质量多维考题与标准答案
+- 模型 A (qwen3.8-max-0902)       : [前序阶段] 派生高质量多维考题与标准答案
 - 人工审查 (Excel 审核)      : [把关阶段] 人工过滤并确认黄金基准
 - 模型 B (qwen3.8-flash)     : [考生系统] 多跳 Agentic 检索与推理作答
-- 模型 C (qwen3.8-max)       : [独立裁判] 严格客观无偏见 Ragas 指标量化打分
+- 模型 C (qwen3.8-max-0902)       : [独立裁判] 严格客观无偏见 Ragas 指标量化打分
 
 【高性能工程特性】
 1. 多线程并发评测：ThreadPoolExecutor (默认 4 并发)，总耗时压缩至 30~45 秒。
@@ -673,7 +673,7 @@ def export_evaluation_report(summary: Dict[str, Any], output_excel_path: str) ->
     now_default = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     timestamp_val = summary.get("timestamp") or now_default
     model_b_val = summary.get("model_b_system") or "qwen3.7-plus"
-    model_c_val = summary.get("model_c_judge") or "qwen3.8-max"
+    model_c_val = summary.get("model_c_judge") or "qwen3.8-max-0902"
     perf = summary.get("performance") or {}
     total_cases_count = summary.get("total_cases", len(summary.get("case_results", [])))
     valid_cases_count = summary.get("valid_cases", total_cases_count)
@@ -788,7 +788,7 @@ def print_terminal_summary_card(summary: Dict[str, Any]):
     print("\n" + "=" * 75)
     print(" 📊  Agentic RAG 企业级评测总览看板 (Ragas Benchmark Report)")
     print("=" * 75)
-    print(f" ⏱️ 评测时间: {summary.get('timestamp', '--')}  |  考生模型: {summary.get('model_b_system', 'qwen3.7-plus')}  |  裁判模型: {summary.get('model_c_judge', 'qwen3.8-max')}")
+    print(f" ⏱️ 评测时间: {summary.get('timestamp', '--')}  |  考生模型: {summary.get('model_b_system', 'qwen3.7-plus')}  |  裁判模型: {summary.get('model_c_judge', 'qwen3.8-max-0902')}")
     print(f" 📈 全量通过率: {passed_c}/{total_c} ({pass_r*100:.1f}%)"
           f"  |  有效样本通过率: {passed_c}/{valid_c} ({valid_pass_r*100:.1f}%)")
     if invalid_c:
@@ -814,7 +814,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Agentic RAG 高并发自动化基准评测运行器")
     parser.add_argument("--excel", default=DEFAULT_BENCHMARK_EXCEL, help="人工审核后的基准测试集 Excel 路径")
     parser.add_argument("--model-b", default=ALI_DEFAULT_ANSWER_MODEL, help="模型 B (生成答案系统模型)")
-    parser.add_argument("--model-c", default=ALI_DEFAULT_JUDGE_MODEL, help="模型 C (独立裁判客观模型，默认使用 qwen3.8-max)")
+    parser.add_argument("--model-c", default=ALI_DEFAULT_JUDGE_MODEL, help="模型 C (独立裁判客观模型，默认使用 qwen3.8-max-0902)")
     parser.add_argument("--workers", type=int, default=2, help="并发执行线程数 (推荐 2，平稳抗限流)")
     parser.add_argument("-q", "--quick", action="store_true", help="极速冒烟测试模式 (仅测前 3 题，~8秒极速反馈)")
     parser.add_argument("--limit", type=int, default=None, help="限制评测题数")

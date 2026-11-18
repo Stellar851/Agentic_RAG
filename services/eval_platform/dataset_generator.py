@@ -4,7 +4,7 @@ Agentic RAG 企业级智能关联知识库系统
 自动化测试集生成与人工审核导出模块 (dataset_generator.py)
 
 【模块核心功能】
-1. 模型 A (qwen3.8-max) 驱动：基于知识库文本切片，利用批量派生 Prompt + 多并发线程池，
+1. 模型 A (qwen3.8-max-0902) 驱动：基于知识库文本切片，利用批量派生 Prompt + 多并发线程池，
    快速生成高覆盖度的“问题 - 黄金标准答案 - 来源切片依据”测试三元组。
 2. 现有基准指南解析：支持一键将《08_Agentic_RAG测试题库与多跳推理评测指南.md》解析为结构化用例。
 3. 人工审核 Excel 导出：利用 openpyxl 生成具有专业商务视觉样式的待审核表格 (.xlsx)，
@@ -44,10 +44,17 @@ logger = logging.getLogger(__name__)
 
 BENCHMARK_DIR = os.path.join(CURRENT_DIR, "benchmarks")
 os.makedirs(BENCHMARK_DIR, exist_ok=True)
-# 路径配置：默认出题严格基于知识库实际已入库的文档目录 (Agentic_RAG/uploads)
-UPLOAD_DOCS_DIR = os.path.join(CURRENT_DIR, "uploads")
-FALLBACK_DOCS_DIR = os.path.join(PROJECT_ROOT, "知识库测试数据集")
-DOCS_DIR = UPLOAD_DOCS_DIR if os.path.exists(UPLOAD_DOCS_DIR) else FALLBACK_DOCS_DIR
+
+# 路径配置：出题严格基于数据中台 (Port 8001) 实际收敛的知识库 uploads 目录。
+# 兼容旧版 eval_platform/uploads 与项目根目录兜底路径。
+_PROJECT_TOP = os.path.dirname(PROJECT_ROOT)
+_UPLOAD_CANDIDATES = [
+    os.path.join(PROJECT_ROOT, "data_platform", "uploads"),
+    os.path.join(CURRENT_DIR, "uploads"),
+    os.path.join(_PROJECT_TOP, "Agentic_RAG", "uploads"),
+    os.path.join(_PROJECT_TOP, "知识库测试数据集"),
+]
+DOCS_DIR = next((d for d in _UPLOAD_CANDIDATES if os.path.isdir(d)), _UPLOAD_CANDIDATES[0])
 
 
 # ==============================================================================
@@ -126,7 +133,7 @@ def parse_guide_markdown(file_path: Optional[str] = None, case_count: Optional[i
 
 
 # ==============================================================================
-# 二、 模型 A (qwen3.8-max) 批量自动化派生题目
+# 二、 模型 A (qwen3.8-max-0902) 批量自动化派生题目
 # ==============================================================================
 
 PROMPT_GENERATE_CASES = """你是一名严格的企业级知识库评测专家架构师。
@@ -234,7 +241,7 @@ PROMPT_GENERATE_TARGET_CASE = """你是一名严格的企业级知识库评测�
 def generate_questions_for_doc(
     doc_name: str,
     doc_path: str,
-    model_a: str = "qwen3.8-max",
+    model_a: str = "qwen3.8-max-0902",
     target_category: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """调用模型 A 对单个文档片段派生考题（支持指定单一专项题型以实现全库广度覆盖）"""
@@ -302,7 +309,7 @@ def generate_questions_for_doc(
 
 def generate_benchmark_from_docs(
     docs_dir: str = DOCS_DIR,
-    model_a: str = "qwen3.8-max",
+    model_a: str = "qwen3.8-max-0902",
     max_workers: int = 4,
     case_count: int = 10
 ) -> List[Dict[str, Any]]:
@@ -496,8 +503,8 @@ def save_cases_to_excel(cases: List[Dict[str, Any]], output_path: Optional[str] 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Agentic RAG 自动化测试集生成与人工审核导出工具")
     parser.add_argument("--mode", choices=["from-guide", "generate"], default="from-guide",
-                        help="模式：from-guide (极速导入已精选的20道题，1秒完成) 或 generate (调用 qwen3.8-max 重新从文档派生)")
-    parser.add_argument("--model-a", default="qwen3.8-max", help="模型 A 命题专家模型名称")
+                        help="模式：from-guide (极速导入已精选的20道题，1秒完成) 或 generate (调用 qwen3.8-max-0902 重新从文档派生)")
+    parser.add_argument("--model-a", default="qwen3.8-max-0902", help="模型 A 命题专家模型名称")
     parser.add_argument("--output", default=os.path.join(BENCHMARK_DIR, "待审核基准测试集.xlsx"),
                         help="导出的 Excel 文件路径")
     parser.add_argument("--workers", type=int, default=3, help="并发请求线程数")

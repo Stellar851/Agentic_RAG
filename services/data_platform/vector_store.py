@@ -528,6 +528,21 @@ class VectorStoreManager:
             "message": f"成功切分为 {total_chunks} 个切片并完成向量化入库 (清洗模式: {'大模型智能清洗' if clean_mode == 'llm' else '代码普通清洗'})"
         }
 
+    def add_document_file(
+        self,
+        file_path: str,
+        chunk_size: int = 600,
+        chunk_overlap: int = 100,
+        clean_mode: str = "rule"
+    ) -> Dict[str, Any]:
+        """上传接口兼容别名：统一走 process_and_add_document 入库流水线。"""
+        return self.process_and_add_document(
+            file_path=file_path,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            clean_mode=clean_mode
+        )
+
     def query_similar_chunks(
         self,
         query: str,

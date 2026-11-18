@@ -8,10 +8,10 @@
 职责:
 1. 提供独立的评测看板工作台 Web UI (http://localhost:8002/)；
 2. 调度五阶段自动化评测流水线：
-   - 阶段一：qwen3.8-max 深入知识库自动命题
+   - 阶段一：qwen3.8-max-0902 深入知识库自动命题
    - 阶段二：黄金题库人工审核与 Excel/JSON 导出持久化
    - 阶段三：作为独立考场，通过 HTTP 协议向目标 Agent (如 http://localhost:8000/api/chat) 并发派题收集作答
-   - 阶段四：独立裁判 qwen3.8-max 深度反思打分 (Ragas 四维指标 + 根因诊断处方)
+   - 阶段四：独立裁判 qwen3.8-max-0902 深度反思打分 (Ragas 四维指标 + 根因诊断处方)
    - 阶段五：即时写盘防丢与 21 列综合指标 Excel 报表编译下载
 3. 彻底实现评测与业务解耦 (Eval-as-a-Service)，可评测任意外部业务 Agent。
 ================================================================================
@@ -35,6 +35,8 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(os.path.dirname(CURRENT_DIR))
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 BENCHMARK_DIR = os.path.join(CURRENT_DIR, "benchmarks")
 os.makedirs(BENCHMARK_DIR, exist_ok=True)
@@ -59,6 +61,7 @@ from dataset_generator import (
     export_to_excel,
     DOCS_DIR
 )
+from common.logging_config import configure_logging, get_logger, get_trace_id, install_trace_middleware
 from benchmark_runner import (
     load_reviewed_cases,
     export_evaluation_report,
@@ -72,6 +75,9 @@ from schemas import (
     SyncExportRequest
 )
 
+configure_logging("eval-platform")
+logger = get_logger("eval_platform.app")
+
 app = FastAPI(
     title="企业级工业评测中台微服务 (Evaluation Platform)",
     description="五阶段自动化全流程基准评测流水线与质量量化中枢 (Eval-as-a-Service)",
@@ -84,6 +90,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+install_trace_middleware(
+    app,
+    "eval-platform",
+    silence_prefixes=["/api/eval/health", "/api/benchmark/latest", "/api/benchmark/config"],
 )
 
 # 挂载静态资源
@@ -202,7 +214,7 @@ async def get_benchmark_cases():
 
 @app.post("/api/benchmark/generate-cases", summary="阶段一：命题专家派生考题")
 async def generate_benchmark_cases(req: BenchmarkGenerateRequest):
-    model_a = req.model_a or "qwen3.8-max"
+    model_a = req.model_a or "qwen3.8-max-0902"
     case_count = int(req.case_count or 10)
     if case_count <= 0:
         case_count = 10
@@ -216,8 +228,8 @@ async def generate_benchmark_cases(req: BenchmarkGenerateRequest):
     else:
         cases = generate_benchmark_from_docs(
             docs_dir=DOCS_DIR,
-            model_name=model_a,
-            max_cases=case_count
+            model_a=model_a,
+            case_count=case_count
         )
 
     export_to_excel(cases, excel_path)
@@ -282,7 +294,8 @@ async def _call_agent_http(query: str, model_name: str, agent_url: str = DEFAULT
         try:
             resp = await client.post(
                 agent_url,
-                json={"query": query, "model_name": model_name, "stream": False}
+                json={"query": query, "model_name": model_name, "stream": False},
+                headers={"X-Trace-ID": get_trace_id()}
             )
             if resp.status_code == 200:
                 payload = resp.json()
@@ -295,8 +308,7 @@ async def _call_agent_http(query: str, model_name: str, agent_url: str = DEFAULT
                         obs = s.get("observation") or s.get("observation_preview") or ""
                         if obs and ("【切片" in obs or "【来源" in obs or "=== 正在精读" in obs):
                             contexts.append(obs)
-                if not contexts:
-                    contexts = data.get("referenced_docs", [])
+                # 禁止再用文档名冒充 Ragas 上下文；证据缺失就保持为空，避免裁判误判事实分。
 
                 return {
                     "answer": data.get("answer", ""),
@@ -331,6 +343,11 @@ async def _call_agent_http(query: str, model_name: str, agent_url: str = DEFAULT
             }
         except Exception as e:
             err_detail = f"{type(e).__name__}: {str(e)}" if str(e) else type(e).__name__
+            logger.warning(
+                "调用业务 Agent 异常",
+                extra={"event": "agent.call_failed", "agent_url": agent_url, "error_detail": err_detail},
+                exc_info=True,
+            )
             return {
                 "answer": f"调用 Agent 异常: {err_detail}",
                 "contexts": [],
@@ -449,6 +466,25 @@ async def run_benchmark_judge_stream(req: BenchmarkRunJudgeRequest):
                 gt = c.get("ground_truth", "")
                 cat = c.get("category", "")
 
+                if c.get("success") is False or c.get("error_type"):
+                    await queue.put(("done_item", {
+                        **c,
+                        "system_answer": c.get("system_answer") or c.get("answer", ans),
+                        "contexts": c.get("contexts", ctxs),
+                        "scores": {},
+                        "is_valid": False,
+                        "is_passed": False,
+                        "execution_status": "failed",
+                        "evaluation_status": "skipped",
+                        "error_stage": "agent",
+                        "error_type": c.get("error_type") or "agent_error",
+                        "retry_recommended": True,
+                        "diagnoses": ["Agent 未能完成有效作答，本题跳过裁判且不计分。"],
+                        "prescriptions": ["修复作答链路后重跑本题。"],
+                        "judge_latency": 0.0
+                    }))
+                    return
+
                 try:
                     eval_res = await asyncio.to_thread(
                         evaluator.evaluate_single,
@@ -460,18 +496,51 @@ async def run_benchmark_judge_stream(req: BenchmarkRunJudgeRequest):
                     )
                 except Exception as e:
                     eval_res = {
-                        "faithfulness": 0.0,
-                        "answer_relevance": 0.0,
-                        "context_precision": 0.0,
-                        "context_recall": 0.0,
-                        "composite_score": 0.0,
-                        "diagnosis": f"裁判异常: {str(e)}",
-                        "actionable_advice": "请检查裁判模型网络与 API 配置"
+                        "is_valid": False,
+                        "evaluation_status": "failed",
+                        "error_stage": "judge",
+                        "error_type": "judge_exception",
+                        "retry_recommended": True,
+                        "diagnoses": [f"裁判异常: {str(e)[:180]}"],
+                        "prescriptions": ["请检查裁判模型网络与 API 配置后重跑。"]
                     }
 
-                score = eval_res.get("composite_score", 0.0)
-                is_passed = score >= 0.60
-                item_evaluated = {**c, **eval_res, "is_passed": is_passed}
+                if eval_res.get("is_valid", eval_res.get("evaluation_status") == "success"):
+                    scores = eval_res.get("scores", {})
+                    triad_score = float(scores.get("rag_triad_score", 0.0) or 0.0)
+                    item_evaluated = {
+                        **c,
+                        "system_answer": c.get("system_answer") or c.get("answer", ans),
+                        "contexts": c.get("contexts", ctxs),
+                        "scores": scores,
+                        "is_valid": True,
+                        "is_passed": triad_score >= 0.80,
+                        "execution_status": "success",
+                        "evaluation_status": "success",
+                        "error_stage": None,
+                        "error_type": None,
+                        "retry_recommended": False,
+                        "diagnoses": eval_res.get("diagnoses", []),
+                        "prescriptions": eval_res.get("prescriptions", []),
+                        "judge_latency": eval_res.get("elapsed_seconds", 0.0)
+                    }
+                else:
+                    item_evaluated = {
+                        **c,
+                        "system_answer": c.get("system_answer") or c.get("answer", ans),
+                        "contexts": c.get("contexts", ctxs),
+                        "scores": {},
+                        "is_valid": False,
+                        "is_passed": False,
+                        "execution_status": "failed",
+                        "evaluation_status": "failed",
+                        "error_stage": eval_res.get("error_stage", "judge"),
+                        "error_type": eval_res.get("error_type", "judge_error"),
+                        "retry_recommended": True,
+                        "diagnoses": eval_res.get("diagnoses", ["裁判未返回有效评分。"]),
+                        "prescriptions": eval_res.get("prescriptions", ["本题本轮不计分，请重跑。"]),
+                        "judge_latency": eval_res.get("elapsed_seconds", 0.0)
+                    }
                 await queue.put(("done_item", item_evaluated))
 
         tasks = [asyncio.create_task(worker(i, c)) for i, c in enumerate(answered_cases)]
