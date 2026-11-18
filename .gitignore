@@ -25,3 +25,6 @@ logs/
 *.sqlite3
 **/chroma_db/
 **/uploads/
+
+#文件名
+Git常用操作流程.md
