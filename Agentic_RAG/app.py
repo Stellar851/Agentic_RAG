@@ -34,8 +34,11 @@ if sys.platform.startswith("win"):
 
 # 将当前 Agentic_RAG 目录置入 sys.path 首位，消除跨目录导入报红
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -50,6 +53,7 @@ from models import (
     get_supported_models_list,
     SUPPORTED_MODELS
 )
+from common.logging_config import configure_logging, get_logger, install_trace_middleware
 # 已解耦：移除本地 vector_store 引用
 from routers import session, chat
 
@@ -73,6 +77,9 @@ logging.getLogger("uvicorn.access").addFilter(EndpointSilenceFilter())
 # 一、 FastAPI 实例初始化与中间件配置
 # ==============================================================================
 
+configure_logging("agent-service")
+logger = get_logger("agent.app")
+
 app = FastAPI(
     title="Agentic RAG 企业智能关联知识库系统",
     description="基于 FastAPI + LangChain Tool-Calling + ChromaDB 构建的高性能企业级智能检索与多跳推理中枢",
@@ -88,6 +95,12 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+install_trace_middleware(
+    app,
+    "agent-service",
+    silence_prefixes=["/api/status", "/api/sessions", "/api/documents", "/api/models"],
 )
 
 # 挂载静态资源目录

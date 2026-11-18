@@ -11,6 +11,7 @@ Agentic RAG 企业级智能关联知识库系统
 
 import os
 import json
+import asyncio
 import traceback
 from typing import Optional, List, Dict, Any
 from fastapi import APIRouter
@@ -24,11 +25,19 @@ from schemas import ChatRequest
 import requests
 
 DATA_PLATFORM_URL = os.getenv("DATA_PLATFORM_URL", "http://127.0.0.1:8001")
+try:
+    from common.logging_config import get_trace_id
+except Exception:
+    get_trace_id = lambda: "-"
 
 
 def _dp_get_session(session_id: str) -> Optional[dict]:
     try:
-        resp = requests.get(f"{DATA_PLATFORM_URL}/api/v1/data/sessions/{session_id}", timeout=5)
+        resp = requests.get(
+            f"{DATA_PLATFORM_URL}/api/v1/data/sessions/{session_id}",
+            headers={"X-Trace-ID": get_trace_id()},
+            timeout=5
+        )
         if resp.status_code == 200:
             return resp.json().get("data", {}).get("session")
     except Exception:
@@ -41,6 +50,7 @@ def _dp_create_session(title: str) -> dict:
         resp = requests.post(
             f"{DATA_PLATFORM_URL}/api/v1/data/sessions",
             json={"title": title, "agent_id": "agentic_rag_core"},
+            headers={"X-Trace-ID": get_trace_id()},
             timeout=5
         )
         if resp.status_code == 200:
@@ -52,7 +62,11 @@ def _dp_create_session(title: str) -> dict:
 
 def _dp_get_messages(session_id: str) -> list:
     try:
-        resp = requests.get(f"{DATA_PLATFORM_URL}/api/v1/data/sessions/{session_id}", timeout=5)
+        resp = requests.get(
+            f"{DATA_PLATFORM_URL}/api/v1/data/sessions/{session_id}",
+            headers={"X-Trace-ID": get_trace_id()},
+            timeout=5
+        )
         if resp.status_code == 200:
             return resp.json().get("data", {}).get("messages", [])
     except Exception:
@@ -65,6 +79,7 @@ def _dp_update_session_title(session_id: str, title: str):
         requests.put(
             f"{DATA_PLATFORM_URL}/api/v1/data/sessions/{session_id}/title",
             json={"title": title},
+            headers={"X-Trace-ID": get_trace_id()},
             timeout=5
         )
     except Exception as e:
@@ -81,6 +96,7 @@ def _dp_add_message(session_id: str, role: str, content: str, steps: list = None
                 "steps": steps or [],
                 "referenced_docs": referenced_docs or []
             },
+            headers={"X-Trace-ID": get_trace_id()},
             timeout=5
         )
     except Exception as e:
@@ -106,14 +122,17 @@ async def chat(req: ChatRequest):
 
     # 1. 确保 session_id 有效，如果未传或不存在则委托数据中台自动创建
     is_new_session = False
-    if not session_id or not _dp_get_session(session_id):
-        new_sess = _dp_create_session(title=user_query[:20] if len(user_query) > 20 else user_query)
+    if not session_id or not await asyncio.to_thread(_dp_get_session, session_id):
+        new_sess = await asyncio.to_thread(
+            _dp_create_session,
+            user_query[:20] if len(user_query) > 20 else user_query
+        )
         session_id = new_sess["session_id"]
         is_new_session = True
 
     try:
         # 2. 从数据中台加载该会话的历史消息构建多轮上下文
-        db_messages = _dp_get_messages(session_id)
+        db_messages = await asyncio.to_thread(_dp_get_messages, session_id)
 
         chat_history_for_agent = []
         if explicit_history is not None:
@@ -126,13 +145,13 @@ async def chat(req: ChatRequest):
                 })
 
         # 3. 保存用户的提问消息到 SQLite
-        _dp_add_message(session_id=session_id, role="user", content=user_query)
+        await asyncio.to_thread(_dp_add_message, session_id, "user", user_query)
 
         # 若是已有会话但只有默认标题 "新对话"，用第一个问题命名
-        current_sess = _dp_get_session(session_id)
+        current_sess = await asyncio.to_thread(_dp_get_session, session_id)
         if current_sess and current_sess.get("title") in ["新对话", ""]:
             title_text = user_query[:18] + ("..." if len(user_query) > 18 else "")
-            _dp_update_session_title(session_id, title_text)
+            await asyncio.to_thread(_dp_update_session_title, session_id, title_text)
 
         agent_service = get_agent_service()
         mode_desc = "打字机流式 (SSE)" if stream_mode else "单次同步响应"
@@ -144,7 +163,7 @@ async def chat(req: ChatRequest):
         print(f"└───" + "─" * 68)
 
         if stream_mode:
-            def generate_stream():
+            async def generate_stream():
                 accumulated_answer = ""
                 final_steps = []
                 final_docs = []
@@ -169,12 +188,13 @@ async def chat(req: ChatRequest):
 
                 # 流式全部结束后，一次性将完整回答写入 SQLite 数据库
                 if accumulated_answer:
-                    _dp_add_message(
-                        session_id=session_id,
-                        role="assistant",
-                        content=accumulated_answer,
-                        steps=final_steps,
-                        referenced_docs=final_docs
+                    await asyncio.to_thread(
+                        _dp_add_message,
+                        session_id,
+                        "assistant",
+                        accumulated_answer,
+                        final_steps,
+                        final_docs
                     )
                 docs_summary = "、".join([f"《{d}》" for d in final_docs]) if final_docs else "未直接引用独立文档"
                 print(f"\n┌─── [步骤 3/3: 答案生成与流式交付完成] " + "─" * 38)
@@ -194,19 +214,25 @@ async def chat(req: ChatRequest):
             )
 
         else:
-            # 传统同步 JSON 调用
-            result = agent_service.ask(user_query=user_query, chat_history=chat_history_for_agent, model_name=target_model)
+            # 传统同步 JSON 调用（移入线程池，避免阻塞 FastAPI 事件循环）
+            result = await asyncio.to_thread(
+                agent_service.ask,
+                user_query=user_query,
+                chat_history=chat_history_for_agent,
+                model_name=target_model
+            )
             answer = result.get("answer", "")
             steps = result.get("steps", [])
             referenced_docs = result.get("referenced_docs", [])
             model_used = result.get("model_name", target_model or ACTIVE_LLM_MODEL)
 
-            _dp_add_message(
-                session_id=session_id,
-                role="assistant",
-                content=answer,
-                steps=steps,
-                referenced_docs=referenced_docs
+            await asyncio.to_thread(
+                _dp_add_message,
+                session_id,
+                "assistant",
+                answer,
+                steps,
+                referenced_docs
             )
             docs_summary = "、".join([f"《{d}》" for d in referenced_docs]) if referenced_docs else "未直接引用独立文档"
             print(f"\n┌─── [步骤 3/3: 答案生成与同步交付完成] " + "─" * 38)

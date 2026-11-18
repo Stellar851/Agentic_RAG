@@ -7,7 +7,7 @@ Agentic RAG 企业级智能关联知识库系统
 本文件是系统的"模型中枢"与"统一模型工厂"，集中管理全系统所有模型 API 及其调用凭证：
 1. 大语言模型 (LLM):
    - 通用动态路由入口: get_llm(model_name=...)
-   - 专职出题与裁判模型: get_judge_llm() -> 严格锁定 qwen3.8-max (阿里百炼逻辑旗舰)
+   - 专职出题与裁判模型: get_judge_llm() -> 严格锁定 qwen3.8-max-0902 (阿里百炼逻辑旗舰)
    - 专职考生与问答模型: get_answer_llm() -> 严格锁定 qwen3.7-plus (阿里百炼主力推理)
    - 兼容别名: get_deepseek_llm (保持历史调用 100% 零修改)
 2. 文本嵌入模型 (Embedding):
@@ -49,7 +49,7 @@ ALI_API_KEY_ENV_VAR: str = "DASHSCOPE_API_KEY"
 ALI_BASE_URL: str = "https://ws-kcf6twfk4vfy5l1e.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 ALI_OFFICIAL_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 ALI_DEFAULT_ANSWER_MODEL: str = "qwen3.8-flash"  # 考生系统与默认作答模型
-ALI_DEFAULT_JUDGE_MODEL: str = "qwen3.8-max"   # 出题专家与量化裁判模型
+ALI_DEFAULT_JUDGE_MODEL: str = "qwen3.8-max-0902"   # 出题专家与量化裁判模型
 
 # 2. DeepSeek 配置 (兼容独立中转/AutoDL 算力机)
 DEEPSEEK_API_KEY_ENV_VAR: str = "Auto_aip_key"
@@ -93,8 +93,8 @@ SUPPORTED_MODELS: Dict[str, Dict[str, Any]] = {
         "provider": "阿里百炼"
     },
     # 阿里百炼旗舰逻辑模型 (命题专家与 Ragas 裁判)
-    "qwen3.8-max": {
-        "id": "qwen3.8-max",
+    "qwen3.8-max-0902": {
+        "id": "qwen3.8-max-0902",
         "name": "通义千问 3.8 Max",
         "short_name": "3.8 Max",
         "desc": "顶级逻辑旗舰 · 深度多跳推理",
@@ -207,7 +207,7 @@ def get_judge_llm(
 ) -> ChatOpenAI:
     """
     【业务专职获取器：出题专家 & 独立反思裁判】
-    必须且仅返回阿里百炼旗舰顶级逻辑模型 qwen3.8-max，保障量化评测与原子反思的极高严谨性。
+    必须且仅返回阿里百炼旗舰顶级逻辑模型 qwen3.8-max-0902，保障量化评测与原子反思的极高严谨性。
     """
     return get_llm(
         model=ALI_DEFAULT_JUDGE_MODEL,
