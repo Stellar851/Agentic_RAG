@@ -1,13 +1,6 @@
 let currentSessionId = null;
         let sessionsCache = [];
 
-        const dropzone = document.getElementById('dropzone');
-        const fileInput = document.getElementById('file-input');
-        const uploadProgress = document.getElementById('upload-progress');
-        const uploadProgressText = document.getElementById('upload-progress-text');
-        const docsList = document.getElementById('docs-list');
-        const docsTabCount = document.getElementById('docs-tab-count');
-        const totalChunksSpan = document.getElementById('total-chunks-badge');
         const sessionsList = document.getElementById('sessions-list');
         const sessionsCount = document.getElementById('sessions-count');
         const messagesContainer = document.getElementById('messages-container');
@@ -44,29 +37,6 @@ let currentSessionId = null;
                 btnStop.addEventListener('click', stopCurrentGeneration);
             }
 
-            // 拖拽上传 (若存在相关 DOM)
-            if (dropzone && fileInput) {
-                dropzone.addEventListener('click', () => fileInput.click());
-                dropzone.addEventListener('dragover', (e) => {
-                    e.preventDefault();
-                    dropzone.classList.add('dragover');
-                });
-                dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
-                dropzone.addEventListener('drop', (e) => {
-                    e.preventDefault();
-                    dropzone.classList.remove('dragover');
-                    if (e.dataTransfer.files.length > 0) {
-                        handleUpload(e.dataTransfer.files);
-                    }
-                });
-
-                fileInput.addEventListener('change', () => {
-                    if (fileInput.files.length > 0) {
-                        handleUpload(fileInput.files);
-                    }
-                });
-            }
-
             // 输入框事件
             userInput.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
@@ -83,32 +53,11 @@ let currentSessionId = null;
             btnSend.addEventListener('click', sendMessage);
         }
 
-        // 侧边栏选项卡切换 (会话记录 vs 文档库)
-        function switchSidebarTab(tabName) {
-            const btnSessions = document.getElementById('tab-btn-sessions');
-            const btnDocs = document.getElementById('tab-btn-docs');
-            const panelSessions = document.getElementById('panel-sessions');
-            const panelDocs = document.getElementById('panel-docs');
-
-            btnSessions.classList.remove('active');
-            btnDocs.classList.remove('active');
-            panelSessions.classList.remove('active');
-            panelDocs.classList.remove('active');
-
-            if (tabName === 'sessions') {
-                btnSessions.classList.add('active');
-                panelSessions.classList.add('active');
-            } else if (tabName === 'docs') {
-                btnDocs.classList.add('active');
-                panelDocs.classList.add('active');
-            }
-        }
-
         // 全局支持的模型缓存
         let cachedSupportedModels = [
-            { model_name: 'qwen3.7-plus', short_name: '3.7 Plus', name: '通义千问 3.7 Plus', desc: '全方位主力 · 极速流利回答', is_configured: true },
+            { model_name: 'qwen3.8-flash', short_name: '3.8-flash', name: '通义千问 3.8-flash', desc: '全方位主力 · 极速流利回答', is_configured: true },
             { model_name: 'qwen3.8-max-0902', short_name: '3.8 Max', name: '通义千问 3.8 Max', desc: '顶级逻辑旗舰 · 深度多跳推理', is_configured: true },
-            { model_name: 'deepseek-v4-pro-0813', short_name: 'DS Pro', name: 'DeepSeek V4 Pro', desc: '高智商逻辑旗舰 · 深度推理作答', is_configured: true }
+            { model_name: 'deepseek-v4-pro-0813', short_name: 'DeepSeek V4 Pro', name: 'DeepSeek V4 Pro', desc: '高智商逻辑旗舰 · 深度推理作答', is_configured: true }
         ];
 
         // 0. 加载支持的大模型列表并驱动 Google Gemini 风格胶囊弹窗
@@ -394,301 +343,6 @@ let currentSessionId = null;
             }
         }
 
-        // 3. 文档库管理
-        async function fetchDocuments() {
-            if (!docsList) return;
-            try {
-                const res = await fetch('/api/documents');
-                const result = await res.json();
-                if (result.code === 200) {
-                    renderDocuments(result.data);
-                }
-            } catch (err) {
-                console.error("获取文档失败", err);
-            }
-        }
-
-        function renderDocuments(docs) {
-            docsTabCount.textContent = docs.length;
-            const totalChunks = docs.reduce((acc, cur) => acc + (cur.total_chunks || 0), 0);
-            totalChunksSpan.textContent = `${totalChunks} 个切片`;
-
-            if (docs.length === 0) {
-                docsList.innerHTML = `
-                    <div style="text-align: center; color: var(--text-muted); font-size: 0.8rem; padding: 24px 0;">
-                        知识库尚无文档<br>请点击上方上传文档
-                    </div>
-                `;
-                return;
-            }
-
-            docsList.innerHTML = docs.map(doc => `
-                <div class="doc-item-card">
-                    <div class="doc-item-info" style="cursor: pointer;" onclick="viewDocumentChunks('${escapeHtml(doc.doc_name)}')" title="点击查看切片与清洗详情">
-                        <div class="doc-item-title" title="${escapeHtml(doc.doc_name)}">${escapeHtml(doc.doc_name)}</div>
-                        <div class="doc-item-meta">
-                            <span>${doc.total_chunks} 切片</span>
-                            <span>•</span>
-                            <span>${doc.file_size_formatted}</span>
-                        </div>
-                    </div>
-                    <div class="doc-item-actions">
-                        <button class="btn-inspect-doc" onclick="viewDocumentChunks('${escapeHtml(doc.doc_name)}')" title="查看切片与清洗详情">
-                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                        </button>
-                        <button class="btn-delete-doc" onclick="deleteDocument('${escapeHtml(doc.doc_name)}')" title="删除文档">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                        </button>
-                    </div>
-                </div>
-            `).join('');
-        }
-
-        // ==========================================
-        // 文档切片与清洗详情验证器逻辑
-        // ==========================================
-        let currentInspectorDocData = null;
-
-        async function viewDocumentChunks(docName) {
-            try {
-                const res = await fetch(`/api/documents/${encodeURIComponent(docName)}/chunks`);
-                const result = await res.json();
-                if (result.code === 200) {
-                    currentInspectorDocData = result.data;
-                    renderChunksInspector(result.data);
-                    document.getElementById('chunks-inspector-modal').style.display = 'flex';
-                } else {
-                    alert('获取切片失败：' + (result.message || '未知错误'));
-                }
-            } catch (err) {
-                alert('获取切片网络异常: ' + err.message);
-            }
-        }
-
-        function closeChunksInspectorModal() {
-            document.getElementById('chunks-inspector-modal').style.display = 'none';
-            document.getElementById('chunks-search-input').value = '';
-            currentInspectorDocData = null;
-        }
-
-        function renderChunksInspector(data, filterKeyword = '') {
-            document.getElementById('inspector-doc-name').textContent = `📄 ${data.doc_name}`;
-
-            const modeText = data.clean_mode === 'llm' ? '🤖 大模型智能清洗 (Mermaid/Markdown)' : '⚡ 代码普通清洗 (纯正则降噪)';
-            const hashText = data.content_hash ? `SHA-256: ${data.content_hash.slice(0, 8)}...` : '';
-
-            document.getElementById('inspector-badges').innerHTML = `
-                <span class="inspector-badge badge-chunks">${data.total_chunks} 个切片</span>
-                <span class="inspector-badge badge-chars">文本总长: ${data.total_chars.toLocaleString()} 字符</span>
-                <span class="inspector-badge badge-mode">${modeText}</span>
-                ${hashText ? `<span class="inspector-badge badge-chars" title="${data.content_hash}">${hashText}</span>` : ''}
-            `;
-
-            const chunksList = document.getElementById('inspector-chunks-list');
-            const keyword = (filterKeyword || '').trim().toLowerCase();
-            const filtered = data.chunks.filter(c => !keyword || (c.text || '').toLowerCase().includes(keyword));
-
-            if (filtered.length === 0) {
-                chunksList.innerHTML = `
-                    <div style="text-align: center; color: var(--text-muted); padding: 32px 0;">
-                        未找到包含关键词 “${escapeHtml(keyword)}” 的切片内容
-                    </div>
-                `;
-                return;
-            }
-
-            chunksList.innerHTML = filtered.map(c => {
-                const chunkId = `chunk-text-${c.chunk_index}`;
-                return `
-                    <div class="chunk-card">
-                        <div class="chunk-header">
-                            <div class="chunk-title-tag">
-                                <span class="chunk-num">#${c.chunk_index}</span>
-                                <span>切片序号 #${c.chunk_index} / ${data.total_chunks}</span>
-                                <span style="color: var(--text-muted); font-size: 0.72rem;">(本块长: ${c.char_count} 字符)</span>
-                            </div>
-                            <button class="btn-copy-chunk" onclick="copyChunkText('${chunkId}')" title="复制该切片内容">
-                                📋 复制本块
-                            </button>
-                        </div>
-                        <div class="chunk-body" id="${chunkId}">${escapeHtml(c.text)}</div>
-                    </div>
-                `;
-            }).join('');
-        }
-
-        function filterChunks() {
-            if (!currentInspectorDocData) return;
-            const keyword = document.getElementById('chunks-search-input').value;
-            renderChunksInspector(currentInspectorDocData, keyword);
-        }
-
-        function copyChunkText(elementId) {
-            const el = document.getElementById(elementId);
-            if (!el) return;
-            navigator.clipboard.writeText(el.innerText || el.textContent).then(() => {
-                alert('切片内容已复制到剪贴板！');
-            }).catch(e => {
-                alert('复制失败: ' + e.message);
-            });
-        }
-
-        let pendingUploadData = null; // 存储后端返回的 needs_confirmation 数据 (all_files, detected_files)
-        let selectedCleanMode = 'llm'; // 触发图表阈值时，默认推荐大模型智能清洗
-
-        function handleUpload(files) {
-            if (!files || files.length === 0) return;
-            startUploadWithPrecheck(Array.from(files));
-        }
-
-        async function startUploadWithPrecheck(files) {
-            const formData = new FormData();
-            formData.append('clean_mode', 'auto'); // 自动预检模式
-            for (let i = 0; i < files.length; i++) {
-                formData.append('files', files[i]);
-            }
-
-            uploadProgress.style.display = 'flex';
-            uploadProgressText.textContent = `正在预检分析 ${files.length} 个文档的结构特征...`;
-
-            try {
-                const res = await fetch('/api/upload', {
-                    method: 'POST',
-                    body: formData
-                });
-                const result = await res.json();
-                uploadProgress.style.display = 'none';
-
-                if (result.code === 200) {
-                    if (result.status === 'needs_confirmation') {
-                        // 触发了复杂架构图阈值！向用户弹窗展示检测到的图表详情与清洗模式选择
-                        pendingUploadData = result;
-                        openDiagramConfirmModal(result.detected_files, result.all_files, result.skipped_files);
-                    } else {
-                        // 未检测到复杂架构图，后端已自动以极速代码模式完成入库！
-                        alert(result.message || '文档已成功入库！');
-                        fetchDocuments();
-                    }
-                } else {
-                    alert('上传预检失败：' + (result.data?.errors?.join('\n') || result.message));
-                }
-            } catch (err) {
-                uploadProgress.style.display = 'none';
-                alert('上传网络请求异常: ' + err.message);
-            } finally {
-                fileInput.value = '';
-            }
-        }
-
-        function openDiagramConfirmModal(detectedFiles, allFiles, skippedFiles = []) {
-            const modal = document.getElementById('clean-mode-modal');
-            const summaryDiv = document.getElementById('modal-files-summary');
-            let html = detectedFiles.map(f => `
-                <div class="modal-file-pill" style="border-left: 3px solid var(--accent-cyan); background: #f0fdf4;">
-                    <span>📐</span>
-                    <strong style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(f.filename)}</strong>
-                    <span style="font-size: 0.72rem; color: #0369a1; background: #e0f2fe; padding: 2px 6px; border-radius: 4px; font-weight: 600;">
-                        拐角: ${f.corner_count} | 箭头: ${f.arrow_count} | 拓扑符号: ${f.total_box_chars}
-                    </span>
-                </div>
-            `).join('');
-
-            if (skippedFiles && skippedFiles.length > 0) {
-                html += `
-                <div class="modal-file-pill" style="border-left: 3px solid #94a3b8; background: #f8fafc; color: #64748b;">
-                    <span>⚡</span>
-                    <span style="font-size: 0.78rem;">检测到 ${skippedFiles.length} 个文件已在知识库中存在，将自动跳过无需重复清洗</span>
-                </div>
-                `;
-            }
-
-            summaryDiv.innerHTML = html;
-            selectCleanMode('llm'); // 触发阈值时，默认高亮大模型推荐选项
-            modal.style.display = 'flex';
-        }
-
-        async function closeCleanModeModal(isCancel = false) {
-            const modal = document.getElementById('clean-mode-modal');
-            modal.style.display = 'none';
-            if (isCancel && pendingUploadData && pendingUploadData.all_files) {
-                try {
-                    await fetch('/api/upload/cancel', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ filenames: pendingUploadData.all_files })
-                    });
-                } catch (e) { }
-            }
-            pendingUploadData = null;
-            fileInput.value = '';
-        }
-
-        function selectCleanMode(mode) {
-            selectedCleanMode = mode;
-            const cardLlm = document.getElementById('mode-card-llm');
-            const cardRule = document.getElementById('mode-card-rule');
-            if (cardLlm && cardRule) {
-                cardLlm.classList.toggle('active', mode === 'llm');
-                cardRule.classList.toggle('active', mode === 'rule');
-            }
-        }
-
-        async function confirmAndExecuteUpload() {
-            if (!pendingUploadData || !pendingUploadData.all_files || pendingUploadData.all_files.length === 0) {
-                closeCleanModeModal(false);
-                return;
-            }
-            const allFiles = pendingUploadData.all_files;
-            const mode = selectedCleanMode;
-            closeCleanModeModal(false);
-
-            uploadProgress.style.display = 'flex';
-            const modeText = mode === 'llm' ? '大模型智能清洗 (拓扑重构)' : '代码普通清洗';
-            uploadProgressText.textContent = `正在以【${modeText}】模式处理入库...`;
-
-            try {
-                const res = await fetch('/api/upload/confirm', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        filenames: allFiles,
-                        clean_mode: mode
-                    })
-                });
-                const result = await res.json();
-                if (result.code === 200) {
-                    alert(result.message);
-                    fetchDocuments();
-                } else {
-                    alert('确认入库失败：' + (result.data?.errors?.join('\n') || result.message));
-                }
-            } catch (err) {
-                alert('确认入库网络异常: ' + err.message);
-            } finally {
-                uploadProgress.style.display = 'none';
-                pendingUploadData = null;
-                fileInput.value = '';
-            }
-        }
-
-        async function deleteDocument(docName) {
-            if (!confirm(`确定要从知识库中删除文档【${docName}】吗？`)) return;
-
-            try {
-                const res = await fetch(`/api/documents/${encodeURIComponent(docName)}`, {
-                    method: 'DELETE'
-                });
-                const result = await res.json();
-                if (result.code === 200) {
-                    fetchDocuments();
-                } else {
-                    alert(result.message);
-                }
-            } catch (err) {
-                alert('删除失败: ' + err.message);
-            }
-        }
-
         function applySampleQuery(text) {
             userInput.value = text;
             userInput.focus();
@@ -814,6 +468,7 @@ let currentSessionId = null;
                 currentActiveStreamReader = reader;
                 const decoder = new TextDecoder('utf-8');
                 let buffer = '';
+                let currentEvent = 'message';
 
                 while (true) {
                     const { done, value } = await reader.read();
@@ -823,7 +478,6 @@ let currentSessionId = null;
                     const lines = buffer.split('\n');
                     buffer = lines.pop(); // 保留不完整的一行
 
-                    let currentEvent = 'message';
                     for (const line of lines) {
                         const trimmed = line.trim();
                         if (trimmed.startsWith('event:')) {

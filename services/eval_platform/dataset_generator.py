@@ -238,6 +238,51 @@ PROMPT_GENERATE_TARGET_CASE = """你是一名严格的企业级知识库评测�
 ]
 """
 
+def _extract_doc_text_for_generation(doc_path: str) -> str:
+    """安全提取多格式文档纯文本供出题使用，避免耦合已迁移的 vector_store。"""
+    ext = os.path.splitext(doc_path)[1].lower()
+    if ext in [".md", ".txt", ".json", ".csv", ".py"]:
+        try:
+            with open(doc_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except UnicodeDecodeError:
+            with open(doc_path, "r", encoding="gbk", errors="ignore") as f:
+                return f.read()
+
+    if ext == ".docx":
+        from docx import Document as DocxDocument
+        doc = DocxDocument(doc_path)
+        return "\n\n".join(p.text.strip() for p in doc.paragraphs if p.text.strip())
+
+    if ext == ".pdf":
+        from pypdf import PdfReader
+        reader = PdfReader(doc_path)
+        return "\n\n".join((page.extract_text() or "").strip() for page in reader.pages if (page.extract_text() or "").strip())
+
+    if ext == ".pptx":
+        from pptx import Presentation
+        prs = Presentation(doc_path)
+        slides = []
+        for slide in prs.slides:
+            parts = []
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for p in shape.text_frame.paragraphs:
+                        if p.text.strip():
+                            parts.append(p.text.strip())
+                elif shape.has_table:
+                    for row in shape.table.rows:
+                        cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                        if cells:
+                            parts.append(" | ".join(cells))
+            if parts:
+                slides.append("\n".join(parts))
+        return "\n\n".join(slides)
+
+    with open(doc_path, "r", encoding="utf-8", errors="ignore") as f:
+        return f.read()
+
+
 def generate_questions_for_doc(
     doc_name: str,
     doc_path: str,
@@ -246,18 +291,7 @@ def generate_questions_for_doc(
 ) -> List[Dict[str, Any]]:
     """调用模型 A 对单个文档片段派生考题（支持指定单一专项题型以实现全库广度覆盖）"""
     try:
-        content = ""
-        ext = os.path.splitext(doc_name)[1].lower()
-        if ext in [".md", ".txt"]:
-            with open(doc_path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-        else:
-            try:
-                from vector_store import DocumentParser
-                content = DocumentParser.extract_raw_text(doc_path)
-            except Exception:
-                with open(doc_path, "r", encoding="utf-8", errors="ignore") as f:
-                    content = f.read()
+        content = _extract_doc_text_for_generation(doc_path)
 
         if not content.strip():
             return []
@@ -323,7 +357,7 @@ def generate_benchmark_from_docs(
     # 过滤出知识库业务文档（同时支持 .md 与 .txt 业务文档，排除非业务说明文档）
     doc_files = sorted(
         f for f in os.listdir(docs_dir)
-        if (f.endswith(".md") or f.endswith(".txt") or f.endswith(".docx") or f.endswith(".pdf"))
+        if f.endswith((".md", ".txt", ".docx", ".pdf", ".pptx"))
         and not f.startswith("08_") and not f.startswith("README")
     )
 

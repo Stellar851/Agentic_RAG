@@ -43,9 +43,12 @@ if sys.platform == "win32":
 _console_lock = threading.Lock()
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
+SERVICES_DIR = os.path.dirname(CURRENT_DIR)
+PROJECT_ROOT = os.path.dirname(SERVICES_DIR)
 if CURRENT_DIR not in sys.path:
     sys.path.insert(0, CURRENT_DIR)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 import openpyxl
 from models import ALI_DEFAULT_ANSWER_MODEL, ALI_DEFAULT_JUDGE_MODEL
@@ -68,16 +71,34 @@ def build_agent_failure_answer(contexts=None):
 class RemoteAgentClient:
     def __init__(self, agent_url=None):
         self.agent_url = agent_url or os.getenv('AGENT_SERVICE_URL', 'http://localhost:8000/api/chat')
+
     def ask(self, user_query, model_name=None, verbose=False):
         import requests
         try:
-            resp = requests.post(self.agent_url, json={'query': user_query, 'model_name': model_name, 'stream': False}, timeout=120)
+            resp = requests.post(
+                self.agent_url,
+                json={'query': user_query, 'model_name': model_name, 'stream': False, 'persist': False},
+                timeout=120
+            )
             if resp.status_code == 200:
                 d = resp.json().get('data', {})
-                return {'answer': d.get('answer', ''), 'contexts': d.get('referenced_docs', []), 'steps': d.get('steps', []), 'success': True}
-            return {'answer': f'Agent HTTP {resp.status_code}', 'contexts': [], 'success': False}
+                contexts = d.get('contexts') or []
+                steps = d.get('steps') or []
+                if not contexts and steps:
+                    for s in steps:
+                        obs = s.get('observation') or s.get('observation_preview') or ''
+                        if obs and ('【切片' in obs or '【来源' in obs or '=== 正在精读' in obs):
+                            contexts.append(obs)
+                return {
+                    'answer': d.get('answer', ''),
+                    'contexts': contexts,
+                    'steps': steps,
+                    'success': d.get('success', True),
+                    'error_type': d.get('error_type')
+                }
+            return {'answer': f'Agent HTTP {resp.status_code}', 'contexts': [], 'success': False, 'error_type': f'http_{resp.status_code}'}
         except Exception as e:
-            return {'answer': f'Agent error: {e}', 'contexts': [], 'success': False}
+            return {'answer': f'Agent error: {e}', 'contexts': [], 'success': False, 'error_type': 'agent_exception'}
 
 def get_agent_service():
     shared = os.path.join(PROJECT_ROOT, 'Agentic_RAG')
@@ -146,7 +167,9 @@ def load_reviewed_cases(excel_path: str = DEFAULT_BENCHMARK_EXCEL) -> List[Dict[
             "source_doc": str(source_doc).strip(),
             "review_status": review_status or "通过",
             "reviewed_gt": str(reviewed_gt).strip(),
+            "reviewed_ground_truth": str(reviewed_gt).strip(),
             "review_comment": review_comment,
+            "review_notes": review_comment,
             "excel_row": row
         })
 
@@ -428,9 +451,7 @@ def run_benchmark_concurrent(
     completed_count = 0
     start_all = time.time()
 
-    # 提前在主线程预热单例，防止多线程首次同时访问 ChromaDB 造成竞态报错
-    from vector_store import get_vector_store
-    get_vector_store()
+    # 提前在主线程预热远程客户端与裁判单例（评测中台已与向量库解耦）
     get_agent_service()
     get_ragas_evaluator(model_name=model_c)
 
@@ -746,11 +767,12 @@ def export_evaluation_report(summary: Dict[str, Any], output_excel_path: str) ->
 
     # 同时同步保存一份为固定的“基准评测集_带量化指标.xlsx”，方便用户一键打开
     inplace_excel_path = os.path.join(BENCHMARK_DIR, "基准评测集_带量化指标.xlsx")
-    try:
-        wb.save(inplace_excel_path)
-        saved_paths.append(inplace_excel_path)
-    except Exception as e:
-        print(f"⚠️ 同步固定基准评测集 Excel 提示 (可能被外部软件打开独占): {e}")
+    if os.path.abspath(output_excel_path) != os.path.abspath(inplace_excel_path):
+        try:
+            wb.save(inplace_excel_path)
+            saved_paths.append(inplace_excel_path)
+        except Exception as e:
+            print(f"⚠️ 同步固定基准评测集 Excel 提示 (可能被外部软件打开独占): {e}")
 
     # 保存一份最新 JSON
     try:

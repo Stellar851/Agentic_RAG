@@ -16,7 +16,8 @@ import json
 import sqlite3
 import uuid
 import datetime
-from typing import List, Dict, Any, Optional
+from contextlib import contextmanager
+from typing import List, Dict, Any, Optional, Iterator
 
 BASE_DIR: str = os.path.dirname(os.path.abspath(__file__))
 DB_FILE_PATH: str = os.path.join(BASE_DIR, "chat_history.db")
@@ -41,8 +42,17 @@ class DataPlatformChatDB:
         conn.execute("PRAGMA foreign_keys=ON")
         return conn
 
+    @contextmanager
+    def _connection_scope(self) -> Iterator[sqlite3.Connection]:
+        """创建并在退出时显式关闭连接，防止 SQLite 文件句柄泄漏。"""
+        conn = self._get_connection()
+        try:
+            yield conn
+        finally:
+            conn.close()
+
     def _init_tables(self):
-        with self._get_connection() as conn:
+        with self._connection_scope() as conn:
             cursor = conn.cursor()
             # 1. 会话表 (chat_sessions) 支持 agent_id
             cursor.execute("""
@@ -72,21 +82,26 @@ class DataPlatformChatDB:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_sess ON chat_messages(session_id)")
             conn.commit()
 
-    def create_session(self, title: str = "新对话", agent_id: str = "agentic_rag_core") -> Dict[str, Any]:
-        """为特定 Agent 创建新会话"""
-        session_id = str(uuid.uuid4())
+    def create_session(
+        self,
+        title: str = "新对话",
+        agent_id: str = "agentic_rag_core",
+        session_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """为特定 Agent 创建新会话（支持外部指定 session_id 以兼容自动补建）。"""
+        actual_session_id = (session_id or "").strip() or str(uuid.uuid4())
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        with self._get_connection() as conn:
+        with self._connection_scope() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO chat_sessions (session_id, title, agent_id, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?)
-            """, (session_id, title, agent_id, now_str, now_str))
+            """, (actual_session_id, title, agent_id, now_str, now_str))
             conn.commit()
 
         return {
-            "session_id": session_id,
+            "session_id": actual_session_id,
             "title": title,
             "agent_id": agent_id,
             "created_at": now_str,
@@ -95,7 +110,7 @@ class DataPlatformChatDB:
 
     def list_sessions(self, agent_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """获取会话列表，可按 agent_id 过滤，按更新时间倒序"""
-        with self._get_connection() as conn:
+        with self._connection_scope() as conn:
             cursor = conn.cursor()
             if agent_id:
                 cursor.execute("""
@@ -115,7 +130,7 @@ class DataPlatformChatDB:
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """获取单个会话的信息"""
-        with self._get_connection() as conn:
+        with self._connection_scope() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT session_id, title, agent_id, created_at, updated_at
@@ -127,7 +142,7 @@ class DataPlatformChatDB:
 
     def update_session_title(self, session_id: str, title: str) -> bool:
         """更新会话标题"""
-        with self._get_connection() as conn:
+        with self._connection_scope() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 UPDATE chat_sessions
@@ -150,7 +165,7 @@ class DataPlatformChatDB:
         referenced_docs_json = json.dumps(referenced_docs, ensure_ascii=False) if referenced_docs else None
         now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        with self._get_connection() as conn:
+        with self._connection_scope() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO chat_messages (session_id, role, content, steps_json, referenced_docs_json, created_at)
@@ -169,7 +184,7 @@ class DataPlatformChatDB:
 
     def get_session_messages(self, session_id: str) -> List[Dict[str, Any]]:
         """获取会话全部历史消息"""
-        with self._get_connection() as conn:
+        with self._connection_scope() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id, session_id, role, content, steps_json, referenced_docs_json, created_at
@@ -196,7 +211,7 @@ class DataPlatformChatDB:
 
     def delete_session(self, session_id: str) -> bool:
         """删除指定会话及关联消息"""
-        with self._get_connection() as conn:
+        with self._connection_scope() as conn:
             cursor = conn.cursor()
             cursor.execute("DELETE FROM chat_messages WHERE session_id = ?", (session_id,))
             cursor.execute("DELETE FROM chat_sessions WHERE session_id = ?", (session_id,))
@@ -205,7 +220,7 @@ class DataPlatformChatDB:
 
     def get_stats(self) -> Dict[str, int]:
         """获取全局会话与消息统计"""
-        with self._get_connection() as conn:
+        with self._connection_scope() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM chat_sessions")
             total_sessions = cursor.fetchone()[0]

@@ -148,9 +148,9 @@ class DocumentParser:
             return raw_text
 
         # ----------------------------------------------------------------------
-        # 分支 1: 用户手动确认选择【代码规则普通清洗】
+        # 分支 1: 默认规则模式 / auto 自动预检模式均走【代码规则普通清洗】
         # ----------------------------------------------------------------------
-        if clean_mode == "rule":
+        if clean_mode in ("rule", "auto", None, ""):
             print(f"\n⚡ [执行模式: 代码普通清洗] 检测到复杂框图特征 (拐角: {corner_count}, 符号: {total_box_chars})，当前为【代码普通清洗】模式")
             print("🧹 [代码规则清洗] 正在执行本地正则纯代码降噪（过滤制表符号与纯线条边框，零 Token 消耗）...")
             cleaned_lines = []
@@ -702,21 +702,32 @@ class VectorStoreManager:
             delete_file: 是否同步删除 uploads 目录下的原始文件
 
         【返回值】
-            bool: 是否执行成功
+            bool: 目标文档存在且删除成功返回 True；目标不存在返回 False
         """
+        safe_name = os.path.basename((doc_name or "").strip())
+        if not safe_name:
+            return False
+
         try:
+            existing = self.collection.get(where={"doc_name": safe_name}, include=[])
+            has_chunks = bool(existing and existing.get("ids"))
+            local_path = os.path.join(UPLOAD_DIR, safe_name)
+            has_file = os.path.isfile(local_path)
+
+            if not has_chunks and not has_file:
+                return False
+
             # 1. 从 ChromaDB 删除相关向量与元数据
-            self.collection.delete(where={"doc_name": doc_name})
+            if has_chunks:
+                self.collection.delete(where={"doc_name": safe_name})
 
             # 2. 从本地磁盘删除文件
-            if delete_file:
-                local_path = os.path.join(UPLOAD_DIR, doc_name)
-                if os.path.exists(local_path):
-                    os.remove(local_path)
-            print(f"🗑️ [文档删除成功] 已清空【{doc_name}】在 ChromaDB 中的所有切片" + (" 及 uploads 本地物理文件" if delete_file else ""))
+            if delete_file and has_file:
+                os.remove(local_path)
+            print(f"🗑️ [文档删除成功] 已清空【{safe_name}】在 ChromaDB 中的所有切片" + (" 及 uploads 本地物理文件" if delete_file else ""))
             return True
         except Exception as e:
-            print(f"❌ [删除异常] 删除文档【{doc_name}】时发生错误: {e}")
+            print(f"❌ [删除异常] 删除文档【{safe_name}】时发生错误: {e}")
             return False
 
     def reset_database(self) -> bool:

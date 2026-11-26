@@ -20,3 +20,4 @@ class ChatRequest(BaseModel):
     history: Optional[List[Dict[str, Any]]] = Field(None, description="显式传递的历史消息")
     stream: Optional[bool] = Field(True, description="是否启用 SSE 流式输出")
     model_name: Optional[str] = Field(None, description="可选：指定本次问答使用的大模型名称（热切换）")
+    persist: Optional[bool] = Field(True, description="是否持久化会话与消息记录，评测调用可设为 False 避免污染历史列表")

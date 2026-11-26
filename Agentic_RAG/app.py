@@ -103,6 +103,9 @@ install_trace_middleware(
     silence_prefixes=["/api/status", "/api/sessions", "/api/documents", "/api/models"],
 )
 
+DATA_PLATFORM_URL = os.getenv("DATA_PLATFORM_URL", "http://127.0.0.1:8001")
+EVAL_PLATFORM_URL = os.getenv("EVAL_PLATFORM_URL", "http://localhost:8002")
+
 # 挂载静态资源目录
 STATIC_DIR = os.path.join(CURRENT_DIR, "static")
 if os.path.isdir(STATIC_DIR):
@@ -116,7 +119,7 @@ INDEX_HTML_PATH = os.path.join(TEMPLATES_DIR, "index.html")
 # ==============================================================================
 
 @app.get("/", response_class=HTMLResponse, summary="渲染前端交互主页面")
-async def index():
+def index():
     """读取并返回前端交互主页面 HTML"""
     if not os.path.exists(INDEX_HTML_PATH):
         raise HTTPException(status_code=404, detail="前端模板 index.html 未找到")
@@ -126,13 +129,13 @@ async def index():
 
 
 @app.get("/benchmark", summary="跳转至独立工业级评测中台微服务大屏")
-async def benchmark_page():
+def benchmark_page():
     """将请求优雅重定向至独立的评测中台服务大屏 (Port 8002)"""
-    return RedirectResponse(url="http://localhost:8002/", status_code=302)
+    return RedirectResponse(url=f"{EVAL_PLATFORM_URL.rstrip('/')}/", status_code=302)
 
 
 @app.get("/api/models", summary="获取系统支持的热切换模型列表")
-async def get_models():
+def get_models():
     """
     【API】获取当前系统已配置支持的全部大模型列表及其配置状态
     供前端顶栏下拉菜单动态渲染与热切换
@@ -149,21 +152,21 @@ async def get_models():
 
 
 @app.get("/api/status", summary="获取后端各组件健康自检状态")
-async def get_system_status():
+def get_system_status():
     """
-    【API】获取后端各组件（主大模型 API、Ollama 本地服务、ChromaDB 向量库）健康状态
+    【API】获取后端各组件（主大模型 API、Ollama 本地服务、数据中台）健康状态
     """
     try:
         # 1. 检查当前主大模型 API 状态
         current_cfg = SUPPORTED_MODELS.get(ACTIVE_LLM_MODEL, {})
-        env_var = current_cfg.get("env_var", ACTIVE_LLM_API_KEY_ENV_VAR)
+        env_var = current_cfg.get("key_env", ACTIVE_LLM_API_KEY_ENV_VAR)
         key = os.getenv(env_var, "")
 
         llm_status = {
             "connected": False,
             "message": "",
             "model_name": ACTIVE_LLM_MODEL,
-            "provider": current_cfg.get("name", "通义千问")
+            "provider": current_cfg.get("provider", "通义千问")
         }
         if key and key.strip():
             masked = f"{key[:6]}...{key[-4:]}" if len(key) > 10 else "***"
@@ -185,7 +188,10 @@ async def get_system_status():
         data_platform_status = {"connected": False, "documents_count": 0, "total_chunks": 0}
         try:
             import urllib.request, json
-            req = urllib.request.Request("http://127.0.0.1:8001/api/v1/data/health", headers={"User-Agent": "AgentApp"})
+            req = urllib.request.Request(
+                f"{DATA_PLATFORM_URL.rstrip('/')}/api/v1/data/health",
+                headers={"User-Agent": "AgentApp"}
+            )
             with urllib.request.urlopen(req, timeout=2) as res:
                 if res.status == 200:
                     dp_data = json.loads(res.read()).get("data", {})
@@ -230,7 +236,7 @@ app.include_router(chat.router)
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 8000))
     print("=" * 70)
     print("🚀 FastAPI Agentic RAG 高性能异步智能知识库系统正在启动...")
     print(f"🌐 Web 页面访问地址: http://127.0.0.1:{port}")

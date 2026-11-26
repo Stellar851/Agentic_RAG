@@ -24,6 +24,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import uuid
 from logging.handlers import RotatingFileHandler
@@ -31,9 +32,12 @@ from typing import Any, Dict, Optional
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from starlette.responses import StreamingResponse
 
 TRACE_HEADER = "X-Trace-ID"
 _REQUEST_TRACE_ID: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("request_trace_id", default=None)
+_RECORD_FACTORY_INSTALLED: bool = False
+_RECORD_FACTORY_LOCK = threading.Lock()
 
 # 日志目录默认收敛到项目根目录 logs/
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -169,19 +173,21 @@ def configure_logging(
     return logger
 
 def get_logger(name: Optional[str] = None) -> logging.Logger:
-    logger = logging.getLogger(name or "rag")
-    if not hasattr(logger, "_rag_service_bound"):
-        old_factory = logging.getLogRecordFactory()
+    global _RECORD_FACTORY_INSTALLED
+    if not _RECORD_FACTORY_INSTALLED:
+        with _RECORD_FACTORY_LOCK:
+            if not _RECORD_FACTORY_INSTALLED:
+                old_factory = logging.getLogRecordFactory()
 
-        def record_factory(*args, **kwargs):
-            record = old_factory(*args, **kwargs)
-            if not hasattr(record, "service"):
-                record.service = os.getenv("RAG_SERVICE_NAME", "rag")
-            return record
+                def record_factory(*args, **kwargs):
+                    record = old_factory(*args, **kwargs)
+                    if not hasattr(record, "service"):
+                        record.service = os.getenv("RAG_SERVICE_NAME", "rag")
+                    return record
 
-        logging.setLogRecordFactory(record_factory)
-        logger._rag_service_bound = True
-    return logger
+                logging.setLogRecordFactory(record_factory)
+                _RECORD_FACTORY_INSTALLED = True
+    return logging.getLogger(name or "rag")
 
 # ---------------------------------------------------------------------------
 # FastAPI Trace-ID 中间件
@@ -204,30 +210,45 @@ class TraceIDMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         trace_id = request.headers.get(TRACE_HEADER) or request.headers.get("X-Request-ID") or new_trace_id()
-        set_trace_id(trace_id)
+        token = _REQUEST_TRACE_ID.set(trace_id)
         path = request.url.path
         silent = any(path.startswith(prefix) for prefix in self.silence_prefixes)
         start = time.perf_counter()
+        is_streaming = False
         try:
             response = await call_next(request)
-        except Exception:
-            reset_trace_id()
-            raise
-        latency_ms = round((time.perf_counter() - start) * 1000, 2)
-        response.headers[TRACE_HEADER] = trace_id
-        if not silent:
-            self.logger.info(
-                "HTTP 请求完成",
-                extra={
-                    "event": "http.completed",
-                    "path": path,
-                    "method": request.method,
-                    "status_code": response.status_code,
-                    "latency_ms": latency_ms,
-                },
-            )
-        reset_trace_id()
-        return response
+            latency_ms = round((time.perf_counter() - start) * 1000, 2)
+            response.headers[TRACE_HEADER] = trace_id
+
+            if isinstance(response, StreamingResponse) or hasattr(response, "body_iterator"):
+                orig_iterator = response.body_iterator
+                is_streaming = True
+
+                async def wrapped_iterator():
+                    stream_token = _REQUEST_TRACE_ID.set(trace_id)
+                    try:
+                        async for chunk in orig_iterator:
+                            yield chunk
+                    finally:
+                        _REQUEST_TRACE_ID.reset(stream_token)
+
+                response.body_iterator = wrapped_iterator()
+
+            if not silent:
+                self.logger.info(
+                    "HTTP 请求完成",
+                    extra={
+                        "event": "http.completed",
+                        "path": path,
+                        "method": request.method,
+                        "status_code": response.status_code,
+                        "latency_ms": latency_ms,
+                    },
+                )
+            return response
+        finally:
+            if not is_streaming:
+                _REQUEST_TRACE_ID.reset(token)
 
 def install_trace_middleware(app, service_name: str, silence_prefixes: Optional[list] = None) -> None:
     """挂载 Trace-ID 中间件，并在响应头回传 trace_id。"""

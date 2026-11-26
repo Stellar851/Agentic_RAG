@@ -99,7 +99,7 @@
                 btnGuideText.textContent = `⚡ 载入基准 ${generateCaseCount} 题`;
             }
             if (btnGenText) {
-                const answerModel = (typeof cachedConfig !== 'undefined' && cachedConfig && cachedConfig.judge_model) ? cachedConfig.judge_model : 'qwen3.8-max-0902';
+                const answerModel = (benchmarkConfig && benchmarkConfig.judge_model) ? benchmarkConfig.judge_model : 'qwen3.8-max-0902';
                 btnGenText.textContent = `🚀 仅基于知识库出 ${generateCaseCount} 题 (${answerModel})`;
             }
         }
@@ -232,7 +232,7 @@
                 const res = await fetch('/api/benchmark/generate-cases', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ mode: 'from-docs', model_a: (typeof cachedConfig !== 'undefined' && cachedConfig && cachedConfig.judge_model) ? cachedConfig.judge_model : 'qwen3.8-max-0902', case_count: generateCaseCount })
+                    body: JSON.stringify({ mode: 'from-docs', model_a: (benchmarkConfig && benchmarkConfig.judge_model) ? benchmarkConfig.judge_model : 'qwen3.8-max-0902', case_count: generateCaseCount })
                 });
                 const data = await res.json();
                 if (data.code === 200) {
@@ -825,7 +825,10 @@
             renderJudgeResultsTable(filtered);
         }
 
+        let currentFilteredJudgeCases = [];
+
         function renderJudgeResultsTable(cases) {
+            currentFilteredJudgeCases = cases || [];
             const tbody = document.getElementById('judgeTableBody');
             if (!cases || cases.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="8" style="text-align: center; color: var(--text-muted); padding: 40px;">未找到匹配的评测结果</td></tr>`;
@@ -898,7 +901,7 @@
 
         function openTraceModal(filteredIndex) {
             if (!latestJudgeReport || !latestJudgeReport.case_results) return;
-            const cases = latestJudgeReport.case_results;
+            const cases = currentFilteredJudgeCases.length ? currentFilteredJudgeCases : latestJudgeReport.case_results;
             // 获取当前过滤后的用例对象
             const caseItem = cases[filteredIndex] || cases[0];
             if (!caseItem) return;
@@ -918,8 +921,9 @@
 
             document.getElementById('modalQueryText').textContent = caseItem.query || '';
             document.getElementById('modalSourceDoc').textContent = caseItem.source_doc || '知识库多文档联合检索';
-            document.getElementById('modalQaLatency').textContent = `${caseItem.qa_latency || '--'}s`;
-            document.getElementById('modalJudgeLatency').textContent = `${caseItem.judge_latency || '--'}s`;
+            const qaLatency = caseItem.qa_latency ?? caseItem.latency;
+            document.getElementById('modalQaLatency').textContent = (qaLatency !== undefined && qaLatency !== null && qaLatency !== '') ? `${qaLatency}s` : '--s';
+            document.getElementById('modalJudgeLatency').textContent = (caseItem.judge_latency !== undefined && caseItem.judge_latency !== null && caseItem.judge_latency !== '') ? `${caseItem.judge_latency}s` : '--s';
 
             document.getElementById('modalExpectedAnswer').textContent = caseItem.ground_truth || caseItem.raw_ground_truth || '无标准答案标注';
             document.getElementById('modalActualAnswer').textContent = caseItem.system_answer || '未产生回答内容';
@@ -941,11 +945,13 @@
 
             // 检索切片预览
             const chunksBox = document.getElementById('modalChunksList');
-            document.getElementById('modalChunksCountBadge').textContent = `召回切片: ${caseItem.contexts_count || 0} 个`;
-            if (caseItem.contexts_preview) {
+            const previewText = caseItem.contexts_preview || (Array.isArray(caseItem.contexts) && caseItem.contexts.length ? caseItem.contexts.join('\n---\n') : '');
+            const chunksCount = caseItem.contexts_count ?? (Array.isArray(caseItem.contexts) ? caseItem.contexts.length : 0);
+            document.getElementById('modalChunksCountBadge').textContent = `召回切片: ${chunksCount} 个`;
+            if (previewText) {
                 chunksBox.innerHTML = `
                     <div class="chunk-item-card" style="font-family: 'JetBrains Mono', monospace; font-size: 0.76rem; color: #cbd5e1; white-space: pre-wrap;">
-                        ${escapeHtml(caseItem.contexts_preview)}
+                        ${escapeHtml(previewText)}
                     </div>
                 `;
             } else {

@@ -97,28 +97,39 @@ def list_available_documents() -> str:
     【工具功能】获取知识库中当前已上传的所有文档列表及简要统计信息。
     【适用场景】当用户提问未指明具体文档名称、询问整体知识库资产、或需要进行多文档宏观对比时调用。
     """
-    print("\n📚 [Agent 触发工具] list_available_documents: 正在通过 HTTP 从数据中台 (Port 8001) 读取知识库文档资产...")
-    try:
-        resp = requests.get(
-            f"{DATA_PLATFORM_URL}/api/v1/data/documents",
-            headers={"X-Trace-ID": get_trace_id()},
-            timeout=5
-        )
-        if resp.status_code == 200:
-            docs = resp.json().get("data", {}).get("documents", [])
-            if not docs:
-                return "当前知识库为空，尚未录入任何业务文档。"
-            summary_list = []
-            for d in docs:
-                summary_list.append({
-                    "文档名称": d.get("doc_name"),
-                    "切片总数": d.get("chunk_count") or d.get("total_chunks", 0),
-                    "文件大小": d.get("file_size_formatted", "--")
-                })
-            return json.dumps(summary_list, ensure_ascii=False, indent=2)
-    except Exception as e:
-        return f"数据中台连接异常: {e}"
-    return "获取文档清单失败"
+    from mcp_client import call_mcp_tool_sync
+
+    def _fallback_list_docs() -> str:
+        print("\n📚 [Agent 降级触发] list_available_documents: 正在通过 HTTP 从数据中台 (Port 8001) 读取知识库文档资产...")
+        try:
+            resp = requests.get(
+                f"{DATA_PLATFORM_URL}/api/v1/data/documents",
+                headers={"X-Trace-ID": get_trace_id()},
+                timeout=5
+            )
+            if resp.status_code == 200:
+                docs = resp.json().get("data", {}).get("documents", [])
+                if not docs:
+                    return "当前知识库为空，尚未录入任何业务文档。"
+                summary_list = [
+                    {
+                        "文档名称": d.get("doc_name"),
+                        "切片总数": d.get("chunk_count") or d.get("total_chunks", 0),
+                        "文件大小": d.get("file_size_formatted", "--")
+                    }
+                    for d in docs
+                ]
+                return json.dumps(summary_list, ensure_ascii=False, indent=2)
+        except Exception as e:
+            return f"数据中台连接异常: {e}"
+        return "获取文档清单失败"
+
+    return call_mcp_tool_sync(
+        tool_name="list_available_documents",
+        arguments={},
+        fallback_func=_fallback_list_docs,
+        trace_id=get_trace_id()
+    )
 
 
 @tool
@@ -131,9 +142,9 @@ def search_knowledge_base(query: str, doc_name_filter: Optional[str] = None) -> 
     """
     from mcp_client import call_mcp_tool_sync
 
-    def _fallback_search(q: str, filter_doc: Optional[str] = None):
-        data = _call_data_platform_retrieve(query=q, doc_name_filter=filter_doc)
-        return data or f"未能从数据中台检索到与 '{q}' 相关的片段，或数据中台当前不可用。"
+    def _fallback_search(query: str, doc_name_filter: Optional[str] = None):
+        data = _call_data_platform_retrieve(query=query, doc_name_filter=doc_name_filter)
+        return data or f"未能从数据中台检索到与 '{query}' 相关的片段，或数据中台当前不可用。"
 
     return call_mcp_tool_sync(
         tool_name="search_knowledge_base",
@@ -153,21 +164,21 @@ def read_specific_document(doc_name: str, max_chunks: int = 6) -> str:
     """
     from mcp_client import call_mcp_tool_sync
 
-    def _fallback_read(name: str, chunks: int = 6):
-        print(f"\n📖 [Agent 降级触发] read_specific_document: 正在通过 HTTP 从数据中台精读文档《{name}》...")
+    def _fallback_read(doc_name: str, max_chunks: int = 6):
+        print(f"\n📖 [Agent 降级触发] read_specific_document: 正在通过 HTTP 从数据中台精读文档《{doc_name}》...")
         try:
             resp = requests.get(
                 f"{DATA_PLATFORM_URL}/api/v1/data/document-chunks",
-                params={"doc_name": name, "max_chunks": chunks},
+                params={"doc_name": doc_name, "max_chunks": max_chunks},
                 headers={"X-Trace-ID": get_trace_id()},
                 timeout=15
             )
             if resp.status_code == 200:
                 data = resp.json().get("data", {})
-                return data.get("formatted_text", f"未读取到文档《{name}》的内容。")
+                return data.get("formatted_text", f"未读取到文档《{doc_name}》的内容。")
         except Exception as e:
-            return f"精读文档《{name}》异常: {e}"
-        return f"未能从数据中台获取文档《{name}》的切片内容。"
+            return f"精读文档《{doc_name}》异常: {e}"
+        return f"未能从数据中台获取文档《{doc_name}》的切片内容。"
 
     return call_mcp_tool_sync(
         tool_name="read_specific_document",

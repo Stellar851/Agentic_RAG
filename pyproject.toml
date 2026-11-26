@@ -1,19 +1,23 @@
 [project]
 name = "rag-project"
-version = "0.1.0"
-description = "Add your description here"
+version = "0.2.0"
+description = "Agentic RAG 企业级微服务智能关联知识库与工业级量化评测系统"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "anyio>=4.0.0",
     "chromadb>=0.5.0",
     "fastapi>=0.110.0",
+    "httpx>=0.27.0",
     "langchain>=0.2.0",
     "langchain-community>=0.2.0",
     "langchain-core>=0.2.0",
     "langchain-openai>=0.1.0",
     "langchain-text-splitters>=0.2.0",
+    "mcp>=2.0.0",
     "ollama>=0.2.0",
     "openai>=1.30.0",
+    "openpyxl>=3.1.0",
     "pypdf>=4.0.0",
     "python-docx>=1.1.0",
     "python-dotenv>=1.0.0",
@@ -21,4 +25,9 @@ dependencies = [
     "python-pptx>=1.0.0",
     "requests>=2.31.0",
     "uvicorn[standard]>=0.29.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
 ]

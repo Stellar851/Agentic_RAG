@@ -40,15 +40,15 @@ mcp_server = MCPServer(
 def perform_two_stage_retrieval(
     query: str,
     doc_name_filter: Optional[str] = None,
-    top_k: int = 15,
-    top_n: int = 5,
+    top_k: int = 10,
+    top_n: int = 3,
     distance_threshold: float = 550.0,
     rerank_threshold: float = 0.40
 ) -> Dict[str, Any]:
     """
     【核心底座算法】两阶段高信噪比漏斗过滤：
-    1. 第一阶段初筛：ChromaDB 向量距离初筛 (<= 550.0)；
-    2. 第二阶段精排：阿里百炼 gte-rerank 语义交叉精排 (>= 0.40)；
+    1. 第一阶段初筛：ChromaDB 向量距离初筛 (Top-10, <= 550.0)；
+    2. 第二阶段精排：阿里百炼 gte-rerank-v2 语义交叉精排 (Top-3, >= 0.40)；
     3. 诚实拒答机制：无合格切片时严厉拒答。
     """
     query = (query or "").strip()
@@ -58,7 +58,9 @@ def perform_two_stage_retrieval(
             "formatted_text": "【检索错误】检索关键词 query 不能为空。",
             "final_chunks": [],
             "referenced_docs": [],
-            "is_all_refused": True
+            "is_all_refused": True,
+            "refusal_reason": "empty_query",
+            "metrics": {"candidate_count": 0, "final_count": 0, "top1_score": 0.0}
         }
 
     vs = get_vector_store()
@@ -69,7 +71,9 @@ def perform_two_stage_retrieval(
             "formatted_text": f"{target_desc}未能初筛到与 '{query}' 相关的片段，请尝试更换检索关键词或扩大检索范围。",
             "final_chunks": [],
             "referenced_docs": [],
-            "is_all_refused": True
+            "is_all_refused": True,
+            "refusal_reason": "candidate_empty",
+            "metrics": {"candidate_count": 0, "final_count": 0, "top1_score": 0.0}
         }
 
     reranker = get_local_reranker()
@@ -105,11 +109,19 @@ def perform_two_stage_retrieval(
             )
         formatted_text = "\n\n".join(snippets)
 
+    top1_score = final_chunks[0].get("rerank_score", 0.0) if final_chunks else 0.0
+
     return {
         "formatted_text": formatted_text,
         "final_chunks": final_chunks,
         "referenced_docs": referenced_docs,
-        "is_all_refused": is_refused
+        "is_all_refused": is_refused,
+        "refusal_reason": "threshold_cutoff" if is_refused else None,
+        "metrics": {
+            "candidate_count": len(candidate_chunks),
+            "final_count": len(final_chunks),
+            "top1_score": top1_score
+        }
     }
 
 
@@ -180,6 +192,31 @@ def read_specific_document(doc_name: str, max_chunks: int = 6) -> str:
     """
     res = perform_read_document_chunks(doc_name=doc_name, max_chunks=max_chunks)
     return res["formatted_text"]
+
+
+@mcp_server.tool(
+    name="list_available_documents",
+    description=(
+        "【企业级数据中台知识资产感知工具】\n"
+        "获取当前知识库中已入库的全部文档名称、切片总数与文件大小摘要。\n"
+        "当用户提问未指明具体文档、询问知识库收录范围或需要多文档宏观对比时调用。"
+    )
+)
+def list_available_documents() -> str:
+    """列出当前知识库所有可用文档与切片统计。"""
+    vs = get_vector_store()
+    docs = vs.list_all_documents()
+    if not docs:
+        return "当前知识库为空，尚未录入任何业务文档。"
+    summary_list = [
+        {
+            "文档名称": d.get("doc_name"),
+            "切片总数": d.get("chunk_count") or d.get("total_chunks", 0),
+            "文件大小": d.get("file_size_formatted", "--")
+        }
+        for d in docs
+    ]
+    return json.dumps(summary_list, ensure_ascii=False, indent=2)
 
 
 # ==============================================================================

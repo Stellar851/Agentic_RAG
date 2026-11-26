@@ -200,9 +200,14 @@ def probe_health():
                 pass
         time.sleep(0.8)
 
-    # 打印最终就绪面板
+    # 打印最终就绪面板（区分全部就绪与部分未就绪）
+    unready = [svc for svc in SERVICES_CONFIG if not svc.get("_ready")]
     print(f"\n{COLOR_BOLD}{COLOR_GREEN}================================================================================")
-    print("🎉 三大微服务集群协同初始化就绪！访问入口如下：")
+    if not unready:
+        print("🎉 三大微服务集群协同初始化就绪！访问入口如下：")
+    else:
+        unready_desc = "、".join(f"{s['name']}(Port {s['port']})" for s in unready)
+        print(f"⚠️ 微服务集群部分就绪（超时未响应: {unready_desc}），已就绪访问入口如下：")
     print("================================================================================")
     print(f" 🤖 业务智能体纯对话界面: {COLOR_CYAN}{SERVICES_CONFIG[2]['web_url']}{COLOR_GREEN}")
     print(f" 📚 数据中台专属管理大屏: {COLOR_YELLOW}{SERVICES_CONFIG[0]['web_url']}{COLOR_GREEN}")
@@ -258,13 +263,15 @@ def main():
     probe_thread.start()
 
     # 主线程维持常驻监听
+    reported_exits = set()
     try:
         while True:
             time.sleep(1)
-            # 检查是否有核心子进程异常退出
+            # 检查是否有核心子进程异常退出（每个子进程仅告警一次，防止刷屏）
             for item in processes:
                 code = item["proc"].poll()
-                if code is not None and not is_shutting_down:
+                if code is not None and not is_shutting_down and item["name"] not in reported_exits:
+                    reported_exits.add(item["name"])
                     print(f"\n⚠️ 子服务 [{item['name']}] 意外退出 (Exit Code: {code})")
     except KeyboardInterrupt:
         shutdown_all_processes()

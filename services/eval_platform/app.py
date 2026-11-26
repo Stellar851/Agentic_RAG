@@ -107,7 +107,7 @@ app.mount("/static", StaticFiles(directory=os.path.join(CURRENT_DIR, "static")),
 # ==============================================================================
 
 @app.get("/", response_class=HTMLResponse, summary="评测工作台中枢首页")
-async def benchmark_index():
+def benchmark_index():
     """读取并渲染评测中枢工作台前端页面 benchmark.html"""
     if not os.path.exists(BENCHMARK_HTML_PATH):
         raise HTTPException(status_code=404, detail="benchmark.html 页面未找到")
@@ -117,7 +117,7 @@ async def benchmark_index():
 
 
 @app.get("/api/eval/health", summary="评测中台健康状态")
-async def health():
+def health():
     return {
         "code": 200,
         "service": "Evaluation Platform Microservice",
@@ -133,7 +133,7 @@ async def health():
 
 @app.get("/api/eval/latest-report", summary="获取最新一轮并发评测综合报告")
 @app.get("/api/benchmark/latest-report", summary="获取最新评测报告快照 (用于前端自愈)")
-async def get_latest_eval_report():
+def get_latest_eval_report():
     if not os.path.exists(LATEST_REPORT_JSON):
         return {"code": 404, "message": "尚未执行过基准评测，暂无报告"}
     try:
@@ -146,7 +146,7 @@ async def get_latest_eval_report():
 
 @app.get("/api/benchmark/latest-answers", summary="获取最新考生作答记录快照")
 @app.get("/api/eval/latest-answers", summary="获取最新考生作答记录快照 (兼容路由)")
-async def get_latest_answered_cases():
+def get_latest_answered_cases():
     if not os.path.exists(LATEST_ANSWERS_JSON):
         return {"code": 404, "message": "尚未执行过考生作答，暂无作答记录"}
     try:
@@ -157,13 +157,18 @@ async def get_latest_answered_cases():
                 item["system_answer"] = item.get("answer", "")
             if "contexts_count" not in item:
                 item["contexts_count"] = len(item.get("contexts", []))
+            if "qa_latency" not in item and "latency" in item:
+                item["qa_latency"] = item["latency"]
+            if "contexts_preview" not in item:
+                ctxs = item.get("contexts") or []
+                item["contexts_preview"] = ("\n---\n".join(ctxs[:3]))[:800] if ctxs else ""
         return {"code": 200, "data": data}
     except Exception as e:
         return JSONResponse(status_code=500, content={"code": 500, "message": str(e)})
 
 
 @app.get("/api/benchmark/config", summary="获取评测中枢动态模型配置")
-async def get_benchmark_config():
+def get_benchmark_config():
     return {
         "code": 200,
         "data": {
@@ -177,7 +182,7 @@ async def get_benchmark_config():
 
 
 @app.get("/api/benchmark/cases", summary="获取当前待审核基准测试集用例列表")
-async def get_benchmark_cases():
+def get_benchmark_cases():
     excel_path = os.path.join(BENCHMARK_DIR, "待审核基准测试集.xlsx")
     json_path = os.path.join(BENCHMARK_DIR, "待审核基准测试集.json")
 
@@ -208,6 +213,32 @@ async def get_benchmark_cases():
     return {"code": 200, "data": cases}
 
 
+@app.get("/api/benchmark/export-cases", summary="导出当前待审核基准测试集 Excel")
+def export_benchmark_cases():
+    excel_path = os.path.join(BENCHMARK_DIR, "待审核基准测试集.xlsx")
+    json_path = os.path.join(BENCHMARK_DIR, "待审核基准测试集.json")
+
+    if not os.path.exists(excel_path):
+        cases = []
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    cases = json.load(f)
+            except Exception:
+                cases = []
+        if not cases:
+            cases = parse_guide_markdown(case_count=10)
+        if not cases:
+            raise HTTPException(status_code=404, detail="待审核测试集为空，无法导出")
+        export_to_excel(cases, excel_path)
+
+    return FileResponse(
+        path=excel_path,
+        filename="Agentic_RAG_待审核基准测试集.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+
 # ==============================================================================
 # 三、 阶段一：自动命题与题库装载
 # ==============================================================================
@@ -224,15 +255,17 @@ async def generate_benchmark_cases(req: BenchmarkGenerateRequest):
     started_at = time.perf_counter()
 
     if req.mode == "from-guide":
-        cases = parse_guide_markdown(case_count=case_count)
+        cases = await asyncio.to_thread(parse_guide_markdown, None, case_count)
     else:
-        cases = generate_benchmark_from_docs(
-            docs_dir=DOCS_DIR,
-            model_a=model_a,
-            case_count=case_count
+        cases = await asyncio.to_thread(
+            generate_benchmark_from_docs,
+            DOCS_DIR,
+            model_a,
+            4,
+            case_count,
         )
 
-    export_to_excel(cases, excel_path)
+    await asyncio.to_thread(export_to_excel, cases, excel_path)
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(cases, f, ensure_ascii=False, indent=2)
 
@@ -249,7 +282,7 @@ async def generate_benchmark_cases(req: BenchmarkGenerateRequest):
 # ==============================================================================
 
 @app.post("/api/benchmark/save-cases", summary="阶段二：审题修正后保存持久化")
-async def save_reviewed_cases(req: BenchmarkSaveCasesRequest):
+def save_reviewed_cases(req: BenchmarkSaveCasesRequest):
     cases = req.cases
     json_path = os.path.join(BENCHMARK_DIR, "待审核基准测试集.json")
     excel_path = os.path.join(BENCHMARK_DIR, "待审核基准测试集.xlsx")
@@ -288,73 +321,80 @@ def _prepare_target_cases(limit: Optional[int]) -> List[Dict[str, Any]]:
     return valid_cases
 
 
-async def _call_agent_http(query: str, model_name: str, agent_url: str = DEFAULT_AGENT_CHAT_URL) -> Dict[str, Any]:
-    """通过 HTTP 协议向 Agent 服务发送提问 (解耦微服务)"""
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        try:
-            resp = await client.post(
-                agent_url,
-                json={"query": query, "model_name": model_name, "stream": False},
-                headers={"X-Trace-ID": get_trace_id()}
-            )
-            if resp.status_code == 200:
-                payload = resp.json()
-                data = payload.get("data", {})
-                contexts = data.get("contexts", [])
-                steps = data.get("steps", [])
-                # 智能兜底：若 contexts 为空，尝试从 steps 的 observation 中提取真实切片正文
-                if not contexts and steps:
-                    for s in steps:
-                        obs = s.get("observation") or s.get("observation_preview") or ""
-                        if obs and ("【切片" in obs or "【来源" in obs or "=== 正在精读" in obs):
-                            contexts.append(obs)
-                # 禁止再用文档名冒充 Ragas 上下文；证据缺失就保持为空，避免裁判误判事实分。
+async def _call_agent_http(
+    query: str,
+    model_name: str,
+    agent_url: str = DEFAULT_AGENT_CHAT_URL,
+    client: Optional[httpx.AsyncClient] = None
+) -> Dict[str, Any]:
+    """通过 HTTP 协议向 Agent 服务发送提问 (解耦微服务，评测流量不持久化会话)"""
+    owns_client = client is None
+    if owns_client:
+        client = httpx.AsyncClient(timeout=180.0)
+    try:
+        resp = await client.post(
+            agent_url,
+            json={"query": query, "model_name": model_name, "stream": False, "persist": False},
+            headers={"X-Trace-ID": get_trace_id()}
+        )
+        if resp.status_code == 200:
+            payload = resp.json()
+            data = payload.get("data", {})
+            contexts = data.get("contexts", [])
+            steps = data.get("steps", [])
+            if not contexts and steps:
+                for s in steps:
+                    obs = s.get("observation") or s.get("observation_preview") or ""
+                    if obs and ("【切片" in obs or "【来源" in obs or "=== 正在精读" in obs):
+                        contexts.append(obs)
 
-                return {
-                    "answer": data.get("answer", ""),
-                    "contexts": contexts,
-                    "steps": steps,
-                    "success": True,
-                    "error_type": None
-                }
-            else:
-                return {
-                    "answer": f"Agent 服务响应异常 (HTTP {resp.status_code})",
-                    "contexts": [],
-                    "steps": [],
-                    "success": False,
-                    "error_type": f"http_{resp.status_code}"
-                }
-        except httpx.ConnectError:
             return {
-                "answer": f"无法连接业务 Agent (请确认 Agent 服务在 {agent_url} 正常运行)",
-                "contexts": [],
-                "steps": [],
-                "success": False,
-                "error_type": "agent_connection_error"
+                "answer": data.get("answer", ""),
+                "contexts": contexts,
+                "steps": steps,
+                "success": data.get("success", True),
+                "error_type": data.get("error_type")
             }
-        except httpx.TimeoutException as e:
-            return {
-                "answer": f"调用 Agent 超时 (超过 180s 限制): {type(e).__name__}",
-                "contexts": [],
-                "steps": [],
-                "success": False,
-                "error_type": "agent_timeout"
-            }
-        except Exception as e:
-            err_detail = f"{type(e).__name__}: {str(e)}" if str(e) else type(e).__name__
-            logger.warning(
-                "调用业务 Agent 异常",
-                extra={"event": "agent.call_failed", "agent_url": agent_url, "error_detail": err_detail},
-                exc_info=True,
-            )
-            return {
-                "answer": f"调用 Agent 异常: {err_detail}",
-                "contexts": [],
-                "steps": [],
-                "success": False,
-                "error_type": "agent_exception"
-            }
+        return {
+            "answer": f"Agent 服务响应异常 (HTTP {resp.status_code})",
+            "contexts": [],
+            "steps": [],
+            "success": False,
+            "error_type": f"http_{resp.status_code}"
+        }
+    except httpx.ConnectError:
+        return {
+            "answer": f"无法连接业务 Agent (请确认 Agent 服务在 {agent_url} 正常运行)",
+            "contexts": [],
+            "steps": [],
+            "success": False,
+            "error_type": "agent_connection_error"
+        }
+    except httpx.TimeoutException as e:
+        return {
+            "answer": f"调用 Agent 超时 (超过 180s 限制): {type(e).__name__}",
+            "contexts": [],
+            "steps": [],
+            "success": False,
+            "error_type": "agent_timeout"
+        }
+    except Exception as e:
+        err_detail = f"{type(e).__name__}: {str(e)}" if str(e) else type(e).__name__
+        logger.warning(
+            "调用业务 Agent 异常",
+            extra={"event": "agent.call_failed", "agent_url": agent_url, "error_detail": err_detail},
+            exc_info=True,
+        )
+        return {
+            "answer": f"调用 Agent 异常: {err_detail}",
+            "contexts": [],
+            "steps": [],
+            "success": False,
+            "error_type": "agent_exception"
+        }
+    finally:
+        if owns_client:
+            await client.aclose()
 
 
 @app.post("/api/benchmark/run-answers-stream", summary="阶段三：考生批量作答 (SSE 实时推流)")
@@ -370,59 +410,63 @@ async def run_benchmark_answers_stream(req: BenchmarkRunAnswersRequest):
         sem = asyncio.Semaphore(concurrency_limit)
         queue = asyncio.Queue()
 
-        async def worker(idx, c):
-            async with sem:
-                q = c["query"]
-                await queue.put(("progress", {
-                    "current": idx + 1,
-                    "total": total,
-                    "query": q,
-                    "category": c.get("category")
-                }))
+        async with httpx.AsyncClient(timeout=180.0) as shared_client:
+            async def worker(idx, c):
+                async with sem:
+                    q = c["query"]
+                    await queue.put(("progress", {
+                        "current": idx + 1,
+                        "total": total,
+                        "query": q,
+                        "category": c.get("category")
+                    }))
 
-                t0 = time.time()
-                qa_res = await _call_agent_http(query=q, model_name=model_b)
-                latency = round(time.time() - t0, 2)
+                    t0 = time.time()
+                    qa_res = await _call_agent_http(query=q, model_name=model_b, client=shared_client)
+                    latency = round(time.time() - t0, 2)
+                    ctxs = qa_res.get("contexts", []) or []
 
-                item = {
-                    "id": c.get("id", idx + 1),
-                    "category": c.get("category", "综合业务推理"),
-                    "query": q,
-                    "ground_truth": c.get("reviewed_ground_truth") or c.get("ground_truth") or "",
-                    "source_doc": c.get("source_doc") or "",
-                    "answer": qa_res.get("answer", ""),
-                    "contexts": qa_res.get("contexts", []),
-                    "steps": qa_res.get("steps", []),
-                    "model_name": model_b,
-                    "latency": latency,
-                    "success": qa_res.get("success", False),
-                    "error_type": qa_res.get("error_type")
-                }
-                await queue.put(("done_item", item))
+                    item = {
+                        "id": c.get("id", idx + 1),
+                        "category": c.get("category", "综合业务推理"),
+                        "query": q,
+                        "ground_truth": c.get("reviewed_ground_truth") or c.get("reviewed_gt") or c.get("ground_truth") or "",
+                        "source_doc": c.get("source_doc") or "",
+                        "answer": qa_res.get("answer", ""),
+                        "contexts": ctxs,
+                        "contexts_preview": ("\n---\n".join(ctxs[:3]))[:800] if ctxs else "",
+                        "steps": qa_res.get("steps", []),
+                        "model_name": model_b,
+                        "latency": latency,
+                        "qa_latency": latency,
+                        "success": qa_res.get("success", False),
+                        "error_type": qa_res.get("error_type")
+                    }
+                    await queue.put(("done_item", item))
 
-        tasks = [asyncio.create_task(worker(i, c)) for i, c in enumerate(target_cases)]
+            tasks = [asyncio.create_task(worker(i, c)) for i, c in enumerate(target_cases)]
 
-        completed_count = 0
-        all_results = []
-        while completed_count < total:
-            ev_type, payload = await queue.get()
-            if ev_type == "progress":
-                yield f"event: progress\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-            elif ev_type == "done_item":
-                payload["system_answer"] = payload.get("answer", "")
-                payload["contexts_count"] = len(payload.get("contexts", []))
-                all_results.append(payload)
-                completed_count += 1
-                frame_data = {
-                    "current": completed_count,
-                    "total": total,
-                    "case": payload,
-                    "item": payload
-                }
-                yield f"event: case_done\ndata: {json.dumps(frame_data, ensure_ascii=False)}\n\n"
-                yield f"event: answer_item\ndata: {json.dumps(frame_data, ensure_ascii=False)}\n\n"
+            completed_count = 0
+            all_results = []
+            while completed_count < total:
+                ev_type, payload = await queue.get()
+                if ev_type == "progress":
+                    yield f"event: progress\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                elif ev_type == "done_item":
+                    payload["system_answer"] = payload.get("answer", "")
+                    payload["contexts_count"] = len(payload.get("contexts", []))
+                    all_results.append(payload)
+                    completed_count += 1
+                    frame_data = {
+                        "current": completed_count,
+                        "total": total,
+                        "case": payload,
+                        "item": payload
+                    }
+                    yield f"event: case_done\ndata: {json.dumps(frame_data, ensure_ascii=False)}\n\n"
+                    yield f"event: answer_item\ndata: {json.dumps(frame_data, ensure_ascii=False)}\n\n"
 
-        await asyncio.gather(*tasks)
+            await asyncio.gather(*tasks)
 
         # 作答全部完成，保存快照
         with open(LATEST_ANSWERS_JSON, "w", encoding="utf-8") as f:
@@ -471,6 +515,8 @@ async def run_benchmark_judge_stream(req: BenchmarkRunJudgeRequest):
                         **c,
                         "system_answer": c.get("system_answer") or c.get("answer", ans),
                         "contexts": c.get("contexts", ctxs),
+                        "contexts_preview": c.get("contexts_preview") or (("\n---\n".join(ctxs[:3]))[:800] if ctxs else ""),
+                        "qa_latency": c.get("qa_latency") or c.get("latency", 0.0),
                         "scores": {},
                         "is_valid": False,
                         "is_passed": False,
@@ -512,6 +558,8 @@ async def run_benchmark_judge_stream(req: BenchmarkRunJudgeRequest):
                         **c,
                         "system_answer": c.get("system_answer") or c.get("answer", ans),
                         "contexts": c.get("contexts", ctxs),
+                        "contexts_preview": c.get("contexts_preview") or (("\n---\n".join(ctxs[:3]))[:800] if ctxs else ""),
+                        "qa_latency": c.get("qa_latency") or c.get("latency", 0.0),
                         "scores": scores,
                         "is_valid": True,
                         "is_passed": triad_score >= 0.80,
@@ -529,6 +577,8 @@ async def run_benchmark_judge_stream(req: BenchmarkRunJudgeRequest):
                         **c,
                         "system_answer": c.get("system_answer") or c.get("answer", ans),
                         "contexts": c.get("contexts", ctxs),
+                        "contexts_preview": c.get("contexts_preview") or (("\n---\n".join(ctxs[:3]))[:800] if ctxs else ""),
+                        "qa_latency": c.get("qa_latency") or c.get("latency", 0.0),
                         "scores": {},
                         "is_valid": False,
                         "is_passed": False,
@@ -566,9 +616,13 @@ async def run_benchmark_judge_stream(req: BenchmarkRunJudgeRequest):
         await asyncio.gather(*tasks)
 
         total_elapsed = round(time.time() - t_start, 2)
+        actual_model_b = next(
+            (c.get("model_name") for c in answered_cases if c.get("model_name")),
+            ALI_DEFAULT_ANSWER_MODEL
+        )
         summary = build_benchmark_summary(
             case_results=all_evaluated,
-            model_b=ALI_DEFAULT_ANSWER_MODEL,
+            model_b=actual_model_b,
             model_c=model_c,
             total_elapsed=total_elapsed
         )
@@ -599,7 +653,7 @@ async def run_benchmark_judge_stream(req: BenchmarkRunJudgeRequest):
 
 @app.post("/api/benchmark/sync-export", summary="阶段五：即时写盘防丢与 Excel 报表编译")
 @app.post("/api/benchmark/sync-and-export", summary="阶段五：即时写盘防丢与 Excel 报表编译 (前端兼容别名)")
-async def sync_export_benchmark(req: SyncExportRequest):
+def sync_export_benchmark(req: SyncExportRequest):
     summary = req.summary
     with open(LATEST_REPORT_JSON, "w", encoding="utf-8") as f:
         json.dump(summary, f, ensure_ascii=False, indent=2)
@@ -615,7 +669,7 @@ async def sync_export_benchmark(req: SyncExportRequest):
 
 
 @app.get("/api/benchmark/download-report", summary="下载 21 列综合指标 Excel 权威报表")
-async def download_eval_report():
+def download_eval_report():
     excel_path = os.path.join(BENCHMARK_DIR, "基准评测集_带量化指标.xlsx")
     if not os.path.exists(excel_path):
         raise HTTPException(status_code=404, detail="评测报表尚未生成，请先完成评测流水线")
