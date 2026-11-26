@@ -24,7 +24,7 @@ class BenchmarkSaveCasesRequest(BaseModel):
 class BenchmarkRunAnswersRequest(BaseModel):
     """阶段三：考生批量作答请求体"""
     limit: Optional[int] = Field(None, description="测试题目数量限制，例如 3 或 5，None 或 0 为全量")
-    model_b: Optional[str] = Field("qwen3.8-flash", description="考生系统模型（默认阿里百炼主力问答模型 qwen3.8-flash）")
+    model_b: Optional[str] = Field("deepseek-v4.1-flash", description="考生系统模型（默认阿里百炼主力问答模型 deepseek-v4.1-flash）")
 
 
 class BenchmarkRunJudgeRequest(BaseModel):

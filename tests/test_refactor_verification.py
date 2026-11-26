@@ -209,10 +209,7 @@ class TestFrontendBackendContracts(unittest.TestCase):
         self.assertIn("async def ask_stream_async", agent_py)
 
     def test_chat_request_persist_field(self):
-        agentic_dir = str(PROJECT_ROOT / "Agentic_RAG")
-        if agentic_dir not in sys.path:
-            sys.path.insert(0, agentic_dir)
-        from schemas import ChatRequest
+        from Agentic_RAG.schemas import ChatRequest
 
         req_default = ChatRequest(query="你好")
         req_ephemeral = ChatRequest(query="评测问题", persist=False)
@@ -267,6 +264,40 @@ class TestEvalRunnerAndSummary(unittest.TestCase):
             benchmark_runner.export_evaluation_report(summary, out_xlsx)
             self.assertTrue(os.path.exists(out_xlsx))
             self.assertGreater(os.path.getsize(out_xlsx), 0)
+
+
+class TestAgentContextSplitting(unittest.TestCase):
+    """7. Agent 精读切片拆分、无效报错过滤与跨工具去重测试。"""
+
+    @unittest.skipUnless(_has_module("langchain_core"), "当前环境未安装 langchain_core")
+    def test_split_and_dedupe_contexts_handles_read_chunks_and_duplicates(self):
+        agentic_dir = str(PROJECT_ROOT / "Agentic_RAG")
+        if agentic_dir not in sys.path:
+            sys.path.insert(0, agentic_dir)
+        import agent
+
+        search_obs = (
+            "【来源 1】文档: 《测试规范.md》 (切片 2/3)\n"
+            "相关度距离: 320.0 | 重排得分: 0.85\n"
+            "内容片段:\n"
+            "第二章正文：超时时间为 3000ms。\n"
+            "----------------------------------------"
+        )
+        read_obs = (
+            "=== 正在精读文档《测试规范.md》前 3 个章节切片 ===\n\n"
+            "【切片 1/3】\n第一章正文：架构概览。\n----------------------------------------\n\n"
+            "【切片 2/3】\n第二章正文：超时时间为 3000ms。\n----------------------------------------\n\n"
+            "【切片 3/3】\n第三章正文：熔断冷却 30 秒。\n----------------------------------------"
+        )
+        error_obs = "知识库中未找到名为《不存在文档》的文档。"
+
+        contexts = agent._split_and_dedupe_contexts([error_obs, search_obs, read_obs])
+        self.assertEqual(len(contexts), 3)
+        joined = "\n".join(contexts)
+        self.assertNotIn("未找到名为", joined)
+        self.assertIn("第一章正文", joined)
+        self.assertIn("第二章正文", joined)
+        self.assertIn("第三章正文", joined)
 
 
 if __name__ == "__main__":

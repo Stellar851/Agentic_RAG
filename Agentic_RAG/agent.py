@@ -101,8 +101,33 @@ def build_agent_failure_answer(contexts: Optional[List[str]] = None) -> str:
     return "系统未能在限定步骤内完成检索与推理，当前无法给出可靠回答。请缩小问题范围后重试。"
 
 
+_INVALID_OBSERVATION_MARKERS = (
+    "未能检索到",
+    "未检索到任何",
+    "未能初筛到",
+    "知识库中未找到名为",
+    "未找到名为",
+    "未能从数据中台",
+)
+
+
+def _context_body_fingerprint(part: str) -> str:
+    """剥离来源/切片元信息头与分隔线，提取正文归一化指纹用于跨工具去重。"""
+    body = str(part or "").strip()
+    body = re.sub(
+        r"^(?:《[^》]+》\s*)?【来源\s*\d+】文档:\s*《.*?》[^\n]*\n相关度距离:[^\n]*\n内容片段:\s*\n?",
+        "",
+        body,
+    )
+    body = re.sub(r"^(?:《[^》]+》\s*)?【切片\s*\d+/\d+】\s*\n?", "", body)
+    body = re.sub(r"^---\s*\[切片\s*\d+\]\s*---\s*\n?", "", body)
+    body = re.sub(r"(?m)^-{10,}\s*$", "", body)
+    normalized = re.sub(r"\s+", " ", body).strip()
+    return normalized or re.sub(r"\s+", " ", str(part or "")).strip()
+
+
 def _split_and_dedupe_contexts(contexts: Optional[List[str]]) -> List[str]:
-    """将工具观察结果拆成独立证据块并去重，避免同一长文本被重复计分。"""
+    """将工具观察结果拆成独立证据块并去重，避免长精读文本被截断或重复计分。"""
     collected: List[str] = []
     seen = set()
 
@@ -113,6 +138,16 @@ def _split_and_dedupe_contexts(contexts: Optional[List[str]]) -> List[str]:
 
         if "【来源 " in text:
             parts = re.split(r"\n{2,}(?=【来源\s*\d+】)", text)
+        elif re.search(r"【切片\s*\d+/\d+】", text):
+            header_match = re.match(r"^===\s*正在精读文档《(.*?)》[^\n]*===\s*", text)
+            doc_name = header_match.group(1).strip() if header_match else ""
+            cleaned_text = text[header_match.end():].strip() if header_match else text
+            parts = re.split(r"\n{0,2}(?=【切片\s*\d+/\d+】)", cleaned_text)
+            if doc_name:
+                parts = [
+                    p if (not p.strip() or doc_name in p) else f"《{doc_name}》 {p.strip()}"
+                    for p in parts
+                ]
         elif "--- [切片" in text:
             parts = re.split(r"\n{0,2}(?=--- \[切片)", text)
         else:
@@ -122,9 +157,9 @@ def _split_and_dedupe_contexts(contexts: Optional[List[str]]) -> List[str]:
             part = part.strip()
             if not part:
                 continue
-            if any(marker in part for marker in ("未能检索到", "未检索到任何", "未能初筛到")):
+            if any(marker in part for marker in _INVALID_OBSERVATION_MARKERS):
                 continue
-            fingerprint = re.sub(r"\s+", " ", part)
+            fingerprint = _context_body_fingerprint(part)
             if fingerprint in seen:
                 continue
             seen.add(fingerprint)
@@ -232,7 +267,8 @@ AGENT_SYSTEM_PROMPT = """你是一个企业级智能知识库首席分析专家�
    - 当在文档 A 中检索到某个重要概念、系统名词、上游依赖或接口定义时，如果文档 A 未作详述，你**必须主动发起第二轮或多轮检索**，查询文档 B、文档 C 中对应的定义或细节。
    - 切忌仅凭单一文档的零散片段断章取义！遇到跨文档关联问题，必须收集齐所有关联文档的关键证据后再给出结论。
 3. **忠于事实，杜绝幻觉**：
-   - 所有的事实、数据、结论必须严格基于检索到的知识库内容。
+   - 所有的事实、数据、结论必须严格基于本次实际检索到的知识库内容。
+   - 严禁引用或推测本次未实际检索到的文档名称、具体条款编号或外部常识来补全论证。
    - 如果检索了多次仍然找不到相关信息，请诚实说明哪部分信息缺失，不要编造答案。
 4. **多轮对话与指代消解 (Coreference Resolution)**：
    - 在多轮连续对话中，用户提问往往包含代词、比较或省略主语（例如“它有哪些模块？”、“与方案A相比呢？”、“这个怎么配置？”）。
@@ -240,13 +276,18 @@ AGENT_SYSTEM_PROMPT = """你是一个企业级智能知识库首席分析专家�
    - 在调用 `search_knowledge_base` 等工具时，**【绝对禁止】直接拿模糊代词（如“它”、“这个”）作为查询词检索**！你必须自主将检索词改写为包含具体实体全称的明确独立查询词（例如：上一轮在聊“网关系统”，用户追问“它的端口是多少”时，你应使用 `search_knowledge_base(query='网关系统 端口号 配置')` 发起检索）。
 5. **检索预算与证据收敛**：
    - 用户点名了具体文档时，优先调用 `search_knowledge_base(..., doc_name_filter="完整文档名")`，不要先做全库泛化检索。
+   - **优先精准检索，克制整篇精读**：优先使用 `search_knowledge_base` 精准定位目标条款；严禁在未先检索定位前直接调用 `read_specific_document` 通读整篇文档，仅当检索片段被截断、缺少相邻条款或需要确认边界拒答时，才按需调用 `read_specific_document` 补读。
    - 同一问题不要重复执行相同检索；通常 2-4 次定向检索足够，原则上不要超过 4 次工具调用。
    - 一旦已获得回答所必需的核心证据，立即停止检索并作答，切勿为了“更完整”无限追加工具调用。
    - 如果证据不足，明确列出缺失点并基于已知内容回答，不得暴露 `Agent stopped due to max iterations` 等内部状态。
-6. **规范的回答结构**：
-   - **核心结论**：开门见山给出回答的主旨。
-   - **关联分析/详细阐述**：分条理展开，清晰点出各个文档之间的逻辑链条（如：“依据《文档A》，...；同时《文档B》指出...”）。
-   - **参考来源**：在末尾明确列出参考了哪些文档及相应章节/片段。
+6. **输出格式优先级与回答结构**：
+   - **最高优先级（严格服从用户显式格式约束）**：当用户提问中明确指定了输出格式、行数、编号/前缀或禁用项（例如“仅用三行”“格式为 X=Y”“每行必须以……开头”“不得包含背景、解释、总结、来源或任何额外文字”）时，**必须 100% 严格按用户指定格式输出纯文本内容**：
+     - 绝对禁止额外附加“核心结论”“关联分析”“参考来源”或“来源：……”等段落；
+     - 绝对禁止擅自添加 Markdown 加粗（如 `**第一阶段**：`）或保留原文表格中的额外副标签（如“绝不妥协：”“受限准入：”“全面放行：”），必须严格对齐用户指定的前缀与格式模板。
+   - **默认回答结构**：仅当用户**未指定**输出格式时，才采用以下三段式结构：
+     - **核心结论**：开门见山给出回答的主旨。
+     - **关联分析/详细阐述**：分条理展开，清晰点出各个文档之间的逻辑链条（如：“依据《文档A》，...；同时《文档B》指出...”）。
+     - **参考来源**：在末尾明确列出本次实际检索到的文档及相应章节/片段。
 """
 
 

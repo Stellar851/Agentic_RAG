@@ -8,7 +8,7 @@ Agentic RAG 企业级智能关联知识库系统
 1. 大语言模型 (LLM):
    - 通用动态路由入口: get_llm(model_name=...)
    - 专职出题与裁判模型: get_judge_llm() -> 严格锁定 qwen3.8-max-0902 (阿里百炼逻辑旗舰)
-   - 专职考生与问答模型: get_answer_llm() -> 严格锁定 qwen3.8-flash (兼容旧别名 qwen3.7-plus)
+   - 专职考生与问答模型: get_answer_llm() -> 严格锁定 deepseek-v4.1-flash (兼容旧别名 deepseek-v4-flash-0731 / qwen3.7-plus)
    - 兼容别名: get_deepseek_llm
 2. 文本嵌入模型 (Embedding):
    - 统一入口: get_embeddings() / get_ollama_embeddings() -> 本地 Ollama bge-m3 (1024 维初筛)
@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 ALI_API_KEY_ENV_VAR: str = "DASHSCOPE_API_KEY"
 ALI_BASE_URL: str = "https://ws-kcf6twfk4vfy5l1e.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 ALI_OFFICIAL_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-ALI_DEFAULT_ANSWER_MODEL: str = "qwen3.8-flash"  # 考生系统与默认作答模型
+ALI_DEFAULT_ANSWER_MODEL: str = "deepseek-v4.1-flash"  # 考生系统与默认作答模型
 ALI_DEFAULT_JUDGE_MODEL: str = "qwen3.8-max-0902"  # 出题专家与量化裁判模型
 
 # 2. DeepSeek 配置 (兼容独立中转/AutoDL 算力机)
@@ -82,6 +82,15 @@ DEFAULT_RERANK_MODEL: str = ALI_DEFAULT_RERANK_MODEL
 # ==============================================================================
 
 SUPPORTED_MODELS: Dict[str, Dict[str, Any]] = {
+    "deepseek-v4.1-flash": {
+        "id": "deepseek-v4.1-flash",
+        "name": "DeepSeek V4.1 Flash",
+        "short_name": "DeepSeek V4.1 Flash",
+        "desc": "极速推理主力 · 阿里百炼平台提供",
+        "base_url": ALI_BASE_URL,
+        "key_env": ALI_API_KEY_ENV_VAR,
+        "provider": "阿里百炼",
+    },
     "qwen3.8-flash": {
         "id": "qwen3.8-flash",
         "name": "通义千问 3.8-flash",
@@ -105,15 +114,6 @@ SUPPORTED_MODELS: Dict[str, Dict[str, Any]] = {
         "name": "DeepSeek V4 Pro",
         "short_name": "DeepSeek V4 Pro",
         "desc": "高智商逻辑旗舰 · 深度推理作答",
-        "base_url": ALI_BASE_URL,
-        "key_env": ALI_API_KEY_ENV_VAR,
-        "provider": "阿里百炼",
-    },
-    "deepseek-v4-flash-0731": {
-        "id": "deepseek-v4-flash-0731",
-        "name": "DeepSeek V4 Flash",
-        "short_name": "DeepSeek V4 Flash",
-        "desc": "极速客观打分 · 阿里百炼平台提供",
         "base_url": ALI_BASE_URL,
         "key_env": ALI_API_KEY_ENV_VAR,
         "provider": "阿里百炼",
@@ -160,6 +160,8 @@ def get_llm(
         canonical_model = "deepseek-v4-pro-0813"
     elif target_model.lower() in ["ds-pro", "deepseek-pro", "deepseek-v4-pro"]:
         canonical_model = "deepseek-v4-pro-0813"
+    elif target_model.lower() in ["deepseek-v4-flash-0731", "deepseek-v4-flash", "ds-flash", "deepseek-flash"]:
+        canonical_model = "deepseek-v4.1-flash"
     elif target_model.lower() in ["qwen3.7-plus", "qwen3.7", "3.7-plus", "3.7plus", "qwen-3.7-plus"]:
         canonical_model = ALI_DEFAULT_ANSWER_MODEL
     else:
@@ -211,7 +213,7 @@ def get_answer_llm(
     streaming: bool = True,
     **kwargs
 ) -> ChatOpenAI:
-    """考生作答模型获取器（锁定当前激活作答模型 qwen3.8-flash）。"""
+    """考生作答模型获取器（锁定当前激活作答模型 deepseek-v4.1-flash）。"""
     return get_llm(
         model=ALI_DEFAULT_ANSWER_MODEL,
         temperature=temperature,

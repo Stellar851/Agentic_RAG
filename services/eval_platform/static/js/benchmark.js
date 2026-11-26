@@ -9,7 +9,7 @@
         // 全局评测动态模型配置中心 (与 models.py 动态联动)
         // =====================================================================
         let benchmarkConfig = {
-            answer_model: 'qwen3.8-flash',
+            answer_model: 'deepseek-v4.1-flash',
             judge_model: 'qwen3.8-max-0902',
             rerank_model: 'gte-rerank-v2',
             embedding_model: 'bge-m3'
@@ -422,7 +422,7 @@
             try {
                 await streamSSEPost('/api/benchmark/run-answers-stream', {
                     limit: selectedLimit,
-                    model_b: benchmarkConfig.answer_model || 'qwen3.8-flash'
+                    model_b: benchmarkConfig.answer_model || 'deepseek-v4.1-flash'
                 }, {
                     progress: (d) => {
                         const pct = Math.round(((d.current - 0.5) / d.total) * 100);

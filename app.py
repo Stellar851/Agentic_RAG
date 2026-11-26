@@ -149,7 +149,7 @@ def shutdown_all_processes(signum=None, frame=None):
         return
     is_shutting_down = True
 
-    print(f"\n{COLOR_BOLD}{COLOR_MAGENTA}🛑 正在安全优雅关闭三大微服务集群...{COLOR_RESET}")
+    print(f"\n{COLOR_BOLD}{COLOR_MAGENTA}🛑 正在关闭三大微服务集群...{COLOR_RESET}")
 
     for item in processes:
         proc = item["proc"]

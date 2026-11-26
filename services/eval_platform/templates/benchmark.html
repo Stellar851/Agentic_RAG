@@ -59,7 +59,7 @@
         <div class="pipeline-strip">
             <div class="pipeline-node">出题: <strong id="pipelineHeaderJudge">qwen3.8-max-0902</strong></div>
             <span class="pipeline-arrow">➔</span>
-            <div class="pipeline-node">作答: <strong id="pipelineHeaderAnswer">qwen3.8-flash</strong></div>
+            <div class="pipeline-node">作答: <strong id="pipelineHeaderAnswer">deepseek-v4.1-flash</strong></div>
             <span class="pipeline-arrow">➔</span>
             <div class="pipeline-node" style="color: #38bdf8;">重排: <strong>gte-rerank-v2</strong></div>
             <span class="pipeline-arrow">➔</span>
@@ -104,7 +104,7 @@
                     <div class="step-index-badge">3</div>
                     <div class="step-tab-content">
                         <div class="step-tab-title">考生系统批量作答</div>
-                        <div class="step-tab-desc" id="tabStep3Desc">qwen3.8-flash + 百炼重排</div>
+                        <div class="step-tab-desc" id="tabStep3Desc">deepseek-v4.1-flash + 百炼重排</div>
                     </div>
                 </button>
                 <button class="step-tab" id="tabStep4" onclick="switchStep(4)">
@@ -259,7 +259,7 @@
                         <div class="section-icon-badge badge-step3">⚡</div>
                         <div>
                             <div class="section-title">阶段三：考生系统批量作答与客观凭据归档</div>
-                            <div class="section-subtitle">由 <strong id="stage3SubtitleModel">qwen3.8-flash</strong> 发起 Tool-Calling 知识库检索，经过<strong>阿里百炼 gte-rerank-v2</strong> 双层截断漏斗过滤后生成客观作答凭据</div>
+                            <div class="section-subtitle">由 <strong id="stage3SubtitleModel">deepseek-v4.1-flash</strong> 发起 Tool-Calling 知识库检索，经过<strong>阿里百炼 gte-rerank-v2</strong> 双层截断漏斗过滤后生成客观作答凭据</div>
                         </div>
                     </div>
                     <div class="btn-group">
@@ -269,7 +269,7 @@
                             <button class="action-btn btn-secondary" style="padding: 4px 10px; font-size: 0.75rem;" onclick="selectLimit(5)" id="btnLimit5">前 5 题</button>
                             <button class="action-btn btn-secondary" style="padding: 4px 10px; font-size: 0.75rem; background: var(--primary); color:#fff;" onclick="selectLimit(0)" id="btnLimitAll">全部题目</button>
                         </div>
-                        <button class="action-btn btn-primary" onclick="startRunAnswers()" id="btnRunAnswers"><span id="btnRunAnswersText">🚀 启动 qwen3.8-flash 批量并发作答</span></button>
+                        <button class="action-btn btn-primary" onclick="startRunAnswers()" id="btnRunAnswers"><span id="btnRunAnswersText">🚀 启动 deepseek-v4.1-flash 批量并发作答</span></button>
                     </div>
                 </div>
 
