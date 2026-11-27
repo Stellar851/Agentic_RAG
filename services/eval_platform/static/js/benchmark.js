@@ -9,8 +9,8 @@
         // 全局评测动态模型配置中心 (与 models.py 动态联动)
         // =====================================================================
         let benchmarkConfig = {
-            answer_model: 'deepseek-v4.1-flash',
-            judge_model: 'qwen3.8-max-0902',
+            answer_model: 'qwen3.6-plus-2026-04-02',
+            judge_model: 'kimi-k3',
             rerank_model: 'gte-rerank-v2',
             embedding_model: 'bge-m3'
         };
@@ -420,9 +420,11 @@
             const sLines = document.getElementById('answersStreamLines');
 
             try {
+                const resumeFlag = Boolean(document.getElementById('chkResumeEval')?.checked);
                 await streamSSEPost('/api/benchmark/run-answers-stream', {
                     limit: selectedLimit,
-                    model_b: benchmarkConfig.answer_model || 'deepseek-v4.1-flash'
+                    model_b: benchmarkConfig.answer_model || 'qwen3.6-plus-2026-04-02',
+                    resume: resumeFlag
                 }, {
                     progress: (d) => {
                         const pct = Math.round(((d.current - 0.5) / d.total) * 100);
@@ -433,6 +435,13 @@
                         div.className = 'stream-item stream-pending';
                         div.innerHTML = `<span class="badge-idx">#${d.current}</span> 检索召回中: ${escapeHtml(d.query)}`;
                         sLines.prepend(div);
+                    },
+                    quota_paused: (d) => {
+                        const warn = document.createElement('div');
+                        warn.className = 'stream-item stream-fail';
+                        warn.innerHTML = `🛑 <strong>配额熔断保护：</strong>${escapeHtml(d.reason || '额度不足，已保存已完成进度，请充值或更换模型后勾选“断点续跑”继续。')}`;
+                        sLines.prepend(warn);
+                        showToast('⚠️ 作答额度耗尽，已安全保留已完成进度！');
                     },
                     case_done: (d) => {
                         const pct = Math.round((d.current / d.total) * 100);
@@ -452,17 +461,26 @@
                             } else {
                                 firstItem.innerHTML = `<span class="badge-idx">#${d.current}</span> ✅ 作答就绪 (${d.case.latency}s, 证据切片: ${d.case.contexts_count}条) · 回复: <em>${escapeHtml((d.case.system_answer || '').substring(0, 45))}...</em>`;
                             }
+                        } else if (d.resumed) {
+                            const div = document.createElement('div');
+                            div.className = 'stream-item stream-ok';
+                            div.innerHTML = `<span class="badge-idx">#${d.current}</span> ♻️ 断点恢复作答 (${d.case.latency || 0}s)`;
+                            sLines.prepend(div);
                         }
                     },
                     all_done: (d) => {
                         pBar.style.width = '100%';
                         pPct.textContent = '100%';
-                        pTxt.innerHTML = `<span>🎉 全量 ${d.total} 道题目作答完成！真实切片证据已存证。</span>`;
+                        pTxt.innerHTML = d.aborted_by_quota
+                            ? `<span>🛑 配额熔断安全暂停：已完成 ${d.success_count}/${d.total} 题并保存至 Checkpoint。</span>`
+                            : `<span>🎉 全量 ${d.total} 道题目作答完成！真实切片证据已存证。</span>`;
                         answeredCases = d.data || d.cases || (Array.isArray(d) ? d : answeredCases);
                         try { localStorage.setItem('benchmark_answered_cases', JSON.stringify(answeredCases)); } catch (e) {}
                         renderAnswersTable();
-                        showToast(`完成 ${answeredCases.length} 道测试题的客观作答！`);
-                        setTimeout(() => { switchStep(4); }, 1200);
+                        if (!d.aborted_by_quota) {
+                            showToast(`完成 ${answeredCases.length} 道测试题的客观作答！`);
+                            setTimeout(() => { switchStep(4); }, 1200);
+                        }
                     }
                 });
             } catch (err) {
@@ -542,7 +560,7 @@
             logBox.innerHTML = `
                 <div class="progress-bar-wrap">
                     <div class="progress-bar-head">
-                        <span id="judgeProgressText">⚖️ 裁判模型 (qwen3.8-max-0902) 启动！针对每道题进行深层原子陈述检验...</span>
+                        <span id="judgeProgressText">⚖️ 裁判模型 (kimi-k3) 启动！针对每道题进行深层原子陈述检验...</span>
                         <span id="judgeProgressPercent" class="progress-badge">0%</span>
                     </div>
                     <div class="progress-bar-track">
@@ -558,9 +576,11 @@
             const sLines = document.getElementById('judgeStreamLines');
 
             try {
+                const resumeFlag = Boolean(document.getElementById('chkResumeEval')?.checked);
                 await streamSSEPost('/api/benchmark/run-judge-stream', {
                     answered_cases: answeredCases,
-                    model_c: benchmarkConfig.judge_model || 'qwen3.8-max-0902'
+                    model_c: benchmarkConfig.judge_model || 'kimi-k3',
+                    resume: resumeFlag
                 }, {
                     progress: (d) => {
                         const pct = Math.round(((d.current - 0.5) / d.total) * 100);
@@ -571,6 +591,13 @@
                         div.className = 'stream-item stream-pending';
                         div.innerHTML = `<span class="badge-idx">#${d.current}</span> 检验原子命题: ${escapeHtml(d.query)}`;
                         sLines.prepend(div);
+                    },
+                    quota_paused: (d) => {
+                        const warn = document.createElement('div');
+                        warn.className = 'stream-item stream-fail';
+                        warn.innerHTML = `🛑 <strong>裁判配额熔断：</strong>${escapeHtml(d.reason || '额度不足，已保存已完成题目评分，请充值后勾选“断点续跑”。')}`;
+                        sLines.prepend(warn);
+                        showToast('⚠️ 裁判额度耗尽，已安全保留已完成进度！');
                     },
                     case_done: (d) => {
                         const pct = Math.round((d.current / d.total) * 100);
@@ -972,23 +999,165 @@
         }
 
         // =====================================================================
-        // 一键全自动化运行全量评测 (Run Full Pipeline)
+        // 一键全自动化运行全量评测 (双模型异步流水线：边作答边打分)
         // =====================================================================
         async function runFullPipelineAutomated() {
             const btn = document.getElementById('btnRunFullPipeline');
-            btn.disabled = true;
-            btn.innerHTML = '<span>⏳ 正在全自动运行流水线...</span>';
+            const resumeFlag = Boolean(document.getElementById('chkResumeEval')?.checked);
+            const reuseAnswersFlag = Boolean(document.getElementById('chkReuseAnswers')?.checked);
 
-            showToast('已启动全自动化全链路评测流水线');
+            btn.disabled = true;
+            btn.innerHTML = '<span>⏳ 双模型流水线并发评测中...</span>';
+
+            showToast('已启动双模型异步流水线（边作答边打分）');
             switchStep(3);
 
-            // 自动启动作答
-            await startRunAnswers();
-            // 自动启动裁判打分
-            await startJudgeEvaluation();
+            answeredCases = [];
+            renderAnswersTable();
 
-            btn.disabled = false;
-            btn.innerHTML = '<span>⚡ 一键全自动化运行全量评测</span>';
+            const answersLogBox = document.getElementById('answersLogBox');
+            const judgeLogBox = document.getElementById('judgeLogBox');
+            if (answersLogBox) {
+                answersLogBox.innerHTML = `
+                    <div class="progress-bar-wrap">
+                        <div class="progress-bar-head">
+                            <span id="answersProgressText">🚀 双流水线作答池启动中 (默认 8 并发)...</span>
+                            <span id="answersProgressPercent" class="progress-badge">0%</span>
+                        </div>
+                        <div class="progress-bar-track">
+                            <div id="answersProgressBar" class="progress-bar-fill" style="width: 0%;"></div>
+                        </div>
+                    </div>
+                    <div id="answersStreamLines" class="stream-lines-box"></div>
+                `;
+            }
+            if (judgeLogBox) {
+                judgeLogBox.innerHTML = `
+                    <div class="progress-bar-wrap">
+                        <div class="progress-bar-head">
+                            <span id="judgeProgressText">⚖️ 裁判池待命中 (默认 10 并发，随作答完成即时开评)...</span>
+                            <span id="judgeProgressPercent" class="progress-badge">0%</span>
+                        </div>
+                        <div class="progress-bar-track">
+                            <div id="judgeProgressBar" class="progress-bar-fill" style="width: 0%;"></div>
+                        </div>
+                    </div>
+                    <div id="judgeStreamLines" class="stream-lines-box"></div>
+                `;
+            }
+
+            const aBar = document.getElementById('answersProgressBar');
+            const aTxt = document.getElementById('answersProgressText');
+            const aPct = document.getElementById('answersProgressPercent');
+            const aLines = document.getElementById('answersStreamLines');
+
+            const jBar = document.getElementById('judgeProgressBar');
+            const jTxt = document.getElementById('judgeProgressText');
+            const jPct = document.getElementById('judgeProgressPercent');
+            const jLines = document.getElementById('judgeStreamLines');
+
+            try {
+                await streamSSEPost('/api/benchmark/run-pipeline-stream', {
+                    limit: selectedLimit,
+                    model_b: benchmarkConfig.answer_model || 'qwen3.6-plus-2026-04-02',
+                    model_c: benchmarkConfig.judge_model || 'kimi-k3',
+                    resume: resumeFlag,
+                    reuse_answers: reuseAnswersFlag
+                }, {
+                    pipeline_meta: (d) => {
+                        if (aTxt) {
+                            aTxt.innerHTML = `<span>🚀 双流水线运行中：作答 <strong>${escapeHtml(d.model_b)}</strong> (${d.answer_concurrency}并发) ➔ 裁判 <strong>${escapeHtml(d.model_c)}</strong> (${d.judge_concurrency}并发)</span>`;
+                        }
+                    },
+                    answer_done: (d) => {
+                        const pct = d.total ? Math.round((d.current / d.total) * 100) : 100;
+                        if (aBar) aBar.style.width = pct + '%';
+                        if (aPct) aPct.textContent = pct + '%';
+                        if (aTxt) aTxt.innerHTML = `<span>⚡ 作答进度 [${d.current}/${d.total}] · 裁判同步流水线打分中...</span>`;
+
+                        answeredCases.push(d.case);
+                        renderAnswersTable();
+
+                        if (aLines) {
+                            const div = document.createElement('div');
+                            const ok = d.case.success !== false;
+                            div.className = ok ? 'stream-item stream-ok' : 'stream-item stream-fail';
+                            const tag = d.resumed ? '♻️ 断点/复用' : (ok ? '✅ 作答完成' : `⚠️ 作答异常 (${escapeHtml(d.case.error_type || 'error')})`);
+                            div.innerHTML = `<span class="badge-idx">#${d.current}</span> ${tag} (${d.case.latency || 0}s) · ${escapeHtml((d.case.query || '').substring(0, 42))}`;
+                            aLines.prepend(div);
+                        }
+                    },
+                    judge_done: (d) => {
+                        const pct = d.total ? Math.round((d.current / d.total) * 100) : 100;
+                        if (jBar) jBar.style.width = pct + '%';
+                        if (jPct) jPct.textContent = pct + '%';
+                        if (jTxt) jTxt.innerHTML = `<span>⚖️ 裁判打分进度 [${d.current}/${d.total}]</span>`;
+
+                        if (jLines) {
+                            const scores = d.case.scores || {};
+                            const score = scores.rag_triad_score || 0;
+                            const isValid = d.case.is_valid !== false;
+                            const isPass = isValid && d.case.is_passed;
+                            const div = document.createElement('div');
+                            if (!isValid) {
+                                div.className = 'stream-item stream-fail';
+                                div.innerHTML = `<span class="badge-idx">#${d.current}</span> ⚠️ 流程故障 (${escapeHtml(d.case.error_type || 'unknown')})`;
+                            } else {
+                                div.className = isPass ? 'stream-item stream-ok' : 'stream-item stream-fail';
+                                div.innerHTML = `<span class="badge-idx">#${d.current}</span> ${isPass ? '✅' : '❌'} 三元组: <strong>${(score * 100).toFixed(1)}分</strong> · ${escapeHtml((d.case.query || '').substring(0, 38))}`;
+                            }
+                            jLines.prepend(div);
+                        }
+                    },
+                    quota_paused: (d) => {
+                        const reason = d.reason || '模型额度已耗尽，已安全暂停并保存已完成进度，充值或切换模型后勾选“断点续跑”即可继续。';
+                        if (aLines) {
+                            const w = document.createElement('div');
+                            w.className = 'stream-item stream-fail';
+                            w.innerHTML = `🛑 <strong>配额熔断：</strong>${escapeHtml(reason)}`;
+                            aLines.prepend(w);
+                        }
+                        if (jLines) {
+                            const w = document.createElement('div');
+                            w.className = 'stream-item stream-fail';
+                            w.innerHTML = `🛑 <strong>配额熔断：</strong>${escapeHtml(reason)}`;
+                            jLines.prepend(w);
+                        }
+                        showToast('🛑 ' + reason);
+                    },
+                    all_done: (d) => {
+                        if (aBar) aBar.style.width = '100%';
+                        if (aPct) aPct.textContent = '100%';
+                        if (jBar) jBar.style.width = '100%';
+                        if (jPct) jPct.textContent = '100%';
+
+                        latestJudgeReport = d.summary || d;
+                        try {
+                            localStorage.setItem('benchmark_answered_cases', JSON.stringify(answeredCases));
+                            localStorage.setItem('benchmark_latest_judge_report', JSON.stringify(latestJudgeReport));
+                        } catch (e) {}
+
+                        const validPassRate = latestJudgeReport.valid_pass_rate ?? latestJudgeReport.pass_rate ?? 0;
+                        const triadScore = (latestJudgeReport.average_scores || {}).rag_triad_score || 0;
+                        const totalElapsed = (latestJudgeReport.performance || {}).total_elapsed_seconds || latestJudgeReport.elapsed_seconds || 0;
+                        if (jTxt) {
+                            jTxt.innerHTML = latestJudgeReport.aborted_by_quota
+                                ? `<span>🛑 配额熔断暂停！已保存 ${latestJudgeReport.valid_cases || 0} 题有效结果 (耗时 ${totalElapsed}s)</span>`
+                                : `<span>🎉 双流水线完成！有效通过率: ${(validPassRate * 100).toFixed(1)}% | 综合分: ${(triadScore * 100).toFixed(1)}分 | 耗时: ${totalElapsed}s</span>`;
+                        }
+                        renderJudgeDashboard(latestJudgeReport);
+                        if (!latestJudgeReport.aborted_by_quota) {
+                            showToast(`双流水线评测完成 (${totalElapsed}s)，正在呈现全景看板`);
+                            setTimeout(() => { switchStep(5); }, 1000);
+                        }
+                    }
+                });
+            } catch (err) {
+                showToast('双流水线运行异常: ' + err.message);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<span>⚡ 一键全自动化运行全量评测</span>';
+            }
         }
 
         async function exportEvaluationExcel() {

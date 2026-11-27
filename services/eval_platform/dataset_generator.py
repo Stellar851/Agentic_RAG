@@ -17,10 +17,11 @@ import sys
 import json
 import re
 import time
+import random
 import logging
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple, Callable
 
 if sys.platform == "win32":
     try:
@@ -38,7 +39,9 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-from models import get_deepseek_llm
+from models import get_deepseek_llm, ALI_DEFAULT_GENERATOR_MODEL
+
+DEFAULT_GEN_WORKERS = max(1, int(os.getenv("EVAL_GEN_WORKERS", "8")))
 
 logger = logging.getLogger(__name__)
 
@@ -283,22 +286,283 @@ def _extract_doc_text_for_generation(doc_path: str) -> str:
         return f.read()
 
 
+PROMPT_GENERATE_DUAL_CASES = """你是一名严格的企业级知识库评测专家架构师。
+请仔细阅读以下给定知识文档片段（长文档可能包含前段与中后段不同章节），为该文档一次性精准派生出 2 道不同专项的高质量考题。
+
+【待考查文档】：{doc_name}
+--------------------------------------------------
+{doc_content}
+--------------------------------------------------
+
+【考题 1 专项要求 ({cat_1})】：
+{req_1}
+
+【考题 2 专项要求 ({cat_2})】：
+{req_2}
+
+【输出格式要求】：
+请严格仅输出如下包含 2 个对象的 JSON 数组，严禁包含任何 Markdown 格式前缀或额外解释文字：
+[
+  {{
+    "category": "{cat_1}",
+    "query": "第1题明确提问...",
+    "ground_truth": "第1题基于切片事实的标准参考答案（边界拒答题须明确指出文档未提及）...",
+    "source_chunks": "引用的原文关键依据句子...",
+    "source_doc": "{doc_name}"
+  }},
+  {{
+    "category": "{cat_2}",
+    "query": "第2题明确提问...",
+    "ground_truth": "第2题基于切片事实的标准参考答案（边界拒答题须明确指出文档未提及）...",
+    "source_chunks": "引用的原文关键依据句子...",
+    "source_doc": "{doc_name}"
+  }}
+]
+"""
+
+PROMPT_GENERATE_CROSS_DOC_CASES = """你是一名严格的企业级知识库评测专家架构师。
+以下给出两篇存在业务关联或同领域对照关系的知识库文档片段，请基于这两篇文档的交叉点，设计 2 道必须**同时检索结合文档 A 与文档 B 才能完整解答**的【📚 召回率-多跳聚合题】（禁止出只看单篇就能答出的题）。
+
+【文档 A：{doc_a}】：
+--------------------------------------------------
+{content_a}
+--------------------------------------------------
+
+【文档 B：{doc_b}】：
+--------------------------------------------------
+{content_b}
+--------------------------------------------------
+
+【输出格式要求】：
+请严格仅输出如下包含 2 个对象的 JSON 数组，严禁包含任何 Markdown 格式前缀或额外解释文字：
+[
+  {{
+    "category": "📚 召回率-多跳聚合题",
+    "query": "必须综合文档A与文档B才能解答的跨文档关联对比或约束推理题1...",
+    "ground_truth": "完整融合文档A与文档B核心依据的标准答案1...",
+    "source_chunks": "分别摘录文档A与文档B的关键依据...",
+    "source_doc": "{doc_a} + {doc_b}"
+  }},
+  {{
+    "category": "📚 召回率-多跳聚合题",
+    "query": "必须综合文档A与文档B才能解答的跨文档关联对比或约束推理题2...",
+    "ground_truth": "完整融合文档A与文档B核心依据的标准答案2...",
+    "source_chunks": "分别摘录文档A与文档B的关键依据...",
+    "source_doc": "{doc_a} + {doc_b}"
+  }}
+]
+"""
+
+_DOMAIN_GROUPS: List[Tuple[str, Tuple[str, ...]]] = [
+    ("compliance_security", ("法律", "安全", "合规", "脱敏", "隐私", "个人信息", "反洗钱", "审计", "开源", "gbt22239")),
+    ("database_tx", ("tidb", "mysql", "事务", "容灾", "湖仓", "存储", "微服务", "rocketmq", "kafka")),
+    ("k8s_infra", ("k8s", "kubernetes", "pod", "service", "scheduler", "rbac", "算力", "显存", "推理", "devops", "ci-cd")),
+    ("api_ecommerce", ("fastapi", "api", "支付", "订单", "电商", "供应链", "冷链", "清算", "发票", "faq")),
+    ("hr_business", ("人力资源", "考勤", "休假", "出差", "外派", "财报", "医药", "客服", "iot")),
+]
+
+
+def _sample_doc_content(content: str, window_index: int = 0, max_chars: int = 3800) -> str:
+    """短文档返回全文；长文档同时拼接“前段核心 + 中/后段偏移章节”，避免重复只看开头。"""
+    text = (content or "").strip()
+    if len(text) <= max_chars:
+        return text
+    head_len = max_chars // 2
+    tail_len = max_chars - head_len - 40
+    tail_span = max(1, len(text) - head_len - tail_len)
+    # window_index=0 优先看中段，后续轮次逐步向后段滑动
+    offset_ratio = ((window_index + 1) * 0.37) % 1.0
+    second_start = head_len + int(tail_span * offset_ratio)
+    second_part = text[second_start: second_start + tail_len]
+    return (
+        text[:head_len]
+        + "\n\n[...中间略，以下为该文档后续章节片段...]\n\n"
+        + second_part
+    )
+
+
+def _extract_json_list_safely(raw_text: str) -> List[Dict[str, Any]]:
+    text = (raw_text or "").strip()
+    if "```json" in text:
+        text = text.split("```json", 1)[1].split("```", 1)[0].strip()
+    elif "```" in text:
+        text = text.split("```", 1)[1].split("```", 1)[0].strip()
+    match = re.search(r"(\[[\s\S]*\]|\{[\s\S]*\})", text)
+    candidate = match.group(1) if match else text
+    try:
+        parsed = json.loads(candidate)
+        if isinstance(parsed, dict):
+            return [parsed]
+        return parsed if isinstance(parsed, list) else []
+    except json.JSONDecodeError as orig_exc:
+        # 若 JSON 数组在中途截断（例如第 2 题未闭合），逐个抢救已完整生成的对象
+        decoder = json.JSONDecoder()
+        salvaged: List[Dict[str, Any]] = []
+        idx = 0
+        length = len(text)
+        while idx < length:
+            brace_idx = text.find("{", idx)
+            if brace_idx < 0:
+                break
+            try:
+                obj, end_idx = decoder.raw_decode(text, brace_idx)
+                if isinstance(obj, dict) and str(obj.get("query") or "").strip():
+                    salvaged.append(obj)
+                idx = max(brace_idx + 1, end_idx)
+            except json.JSONDecodeError:
+                idx = brace_idx + 1
+        if salvaged:
+            return salvaged
+        raise orig_exc
+
+
+def _invoke_generator_json(
+    prompt: str,
+    model_a: str,
+    rate_limit_retries: int = 3,
+    max_tokens: int = 4096,
+    disable_thinking: bool = True,
+) -> List[Dict[str, Any]]:
+    """调用命题大模型并安全解析 JSON 数组，默认关闭思考链消耗并内置 429 退避与参数回退。"""
+    use_extra_body = bool(disable_thinking)
+    rl_attempts = 0
+    while True:
+        llm_kwargs: Dict[str, Any] = {
+            "model": model_a,
+            "temperature": 0.3,
+            "streaming": False,
+            "max_tokens": max_tokens,
+        }
+        if use_extra_body:
+            llm_kwargs["extra_body"] = {"enable_thinking": False}
+        llm = get_deepseek_llm(**llm_kwargs)
+        try:
+            resp = llm.invoke(prompt)
+            content = resp.content.strip() if hasattr(resp, "content") else str(resp).strip()
+            return _extract_json_list_safely(content)
+        except Exception as exc:
+            err_low = str(exc).lower()
+            is_unsupported_extra = use_extra_body and any(
+                tok in err_low
+                for tok in ("enable_thinking", "extra_body", "unknown parameter", "unrecognized", "invalid_request", "400")
+            )
+            if is_unsupported_extra:
+                logger.info("模型 %s 不支持 enable_thinking=False，已自动回退普通模式重试", model_a)
+                use_extra_body = False
+                continue
+            is_rl = any(tok in err_low for tok in ("429", "rate limit", "too many requests", "burst", "throttl"))
+            if is_rl and rl_attempts < rate_limit_retries:
+                time.sleep(min(12.0, 2.0 ** (rl_attempts + 1)) + random.uniform(0.0, 0.6))
+                rl_attempts += 1
+                continue
+            raise
+
+
+def _build_cross_doc_pairs(
+    doc_files: List[str],
+    pair_count: int,
+    exclude_pairs: Optional[set] = None,
+) -> List[Tuple[str, str]]:
+    """按主题域智能配对同领域文档，构建真实跨文档多跳任务。"""
+    if len(doc_files) < 2 or pair_count <= 0:
+        return []
+
+    buckets: Dict[str, List[str]] = {name: [] for name, _ in _DOMAIN_GROUPS}
+    buckets["other"] = []
+    for fname in doc_files:
+        low = fname.lower()
+        placed = False
+        for gname, kws in _DOMAIN_GROUPS:
+            if any(kw in low for kw in kws):
+                buckets[gname].append(fname)
+                placed = True
+                break
+        if not placed:
+            buckets["other"].append(fname)
+
+    candidate_pairs: List[Tuple[str, str]] = []
+    seen_pairs = set(exclude_pairs or set())
+
+    def _add_pair(a: str, b: str):
+        if a == b:
+            return
+        key = tuple(sorted((a, b)))
+        if key not in seen_pairs:
+            seen_pairs.add(key)
+            candidate_pairs.append((a, b))
+
+    # 1. 优先同领域内邻接配对与跨步配对
+    for _, items in buckets.items():
+        if len(items) < 2:
+            continue
+        for idx in range(0, len(items) - 1, 2):
+            _add_pair(items[idx], items[idx + 1])
+        for idx in range(1, len(items) - 1, 2):
+            _add_pair(items[idx], items[idx + 1])
+
+    # 2. 若组内配对不足，再按全库跨步顺序补充跨界关联对
+    if len(candidate_pairs) < pair_count:
+        n = len(doc_files)
+        for gap in range(1, n):
+            for i in range(n):
+                _add_pair(doc_files[i], doc_files[(i + gap) % n])
+                if len(candidate_pairs) >= pair_count * 2:
+                    break
+            if len(candidate_pairs) >= pair_count * 2:
+                break
+
+    return candidate_pairs[:pair_count]
+
+
+def _format_generated_cases(raw_items: List[Dict[str, Any]], default_doc: str, default_cat: str) -> List[Dict[str, Any]]:
+    formatted: List[Dict[str, Any]] = []
+    for c in raw_items or []:
+        if not isinstance(c, dict):
+            continue
+        q = str(c.get("query") or "").strip()
+        if not q:
+            continue
+        formatted.append({
+            "category": str(c.get("category") or default_cat).strip(),
+            "query": q,
+            "ground_truth": str(c.get("ground_truth") or "").strip(),
+            "source_chunks": str(c.get("source_chunks") or "").strip(),
+            "source_doc": str(c.get("source_doc") or default_doc).strip(),
+            "review_status": "待确认",
+            "reviewed_ground_truth": "",
+            "review_notes": "",
+        })
+    return formatted
+
+
 def generate_questions_for_doc(
     doc_name: str,
     doc_path: str,
-    model_a: str = "qwen3.8-max-0902",
-    target_category: Optional[str] = None
+    model_a: str = ALI_DEFAULT_GENERATOR_MODEL,
+    target_category: Optional[str] = None,
+    *,
+    window_index: int = 0,
+    dual_categories: Optional[Tuple[str, str]] = None,
 ) -> List[Dict[str, Any]]:
-    """调用模型 A 对单个文档片段派生考题（支持指定单一专项题型以实现全库广度覆盖）"""
+    """调用模型 A 对单个文档片段派生考题（支持单题或双题同出+长文档滑动采样）。"""
     try:
         content = _extract_doc_text_for_generation(doc_path)
-
         if not content.strip():
             return []
 
-        # 截取最具价值的业务核心章节
-        trimmed_content = content[:3500]
-        llm = get_deepseek_llm(model=model_a, temperature=0.3, streaming=False)
+        trimmed_content = _sample_doc_content(content, window_index=window_index, max_chars=3800)
+        if dual_categories:
+            cat_1, cat_2 = dual_categories
+            prompt = PROMPT_GENERATE_DUAL_CASES.format(
+                doc_name=doc_name,
+                doc_content=trimmed_content,
+                cat_1=cat_1,
+                req_1=CATEGORY_REQUIREMENTS[cat_1],
+                cat_2=cat_2,
+                req_2=CATEGORY_REQUIREMENTS[cat_2],
+            )
+            cases = _invoke_generator_json(prompt, model_a=model_a)
+            return _format_generated_cases(cases, default_doc=doc_name, default_cat=cat_1)[:2]
 
         if target_category and target_category in CATEGORY_REQUIREMENTS:
             prompt = PROMPT_GENERATE_TARGET_CASE.format(
@@ -310,51 +574,63 @@ def generate_questions_for_doc(
         else:
             prompt = PROMPT_GENERATE_CASES.format(doc_name=doc_name, doc_content=trimmed_content)
 
-        resp = llm.invoke(prompt)
-        text = resp.content.strip()
-
-        # 清洗可能存在的 Markdown 标签
-        if "```json" in text:
-            text = text.split("```json")[1].split("```")[0].strip()
-        elif "```" in text:
-            text = text.split("```")[1].split("```")[0].strip()
-
-        cases = json.loads(text)
-        if isinstance(cases, dict):
-            cases = [cases]
-
-        formatted = []
-        for c in cases:
-            formatted.append({
-                "category": c.get("category", target_category or "综合业务推理"),
-                "query": c.get("query", ""),
-                "ground_truth": c.get("ground_truth", ""),
-                "source_chunks": c.get("source_chunks", ""),
-                "source_doc": doc_name,
-                "review_status": "待确认",
-                "reviewed_ground_truth": "",
-                "review_notes": ""
-            })
-        return formatted
-    except Exception as e:
+        cases = _invoke_generator_json(prompt, model_a=model_a)
+        return _format_generated_cases(cases, default_doc=doc_name, default_cat=target_category or "综合业务推理")
+    except Exception:
         logger.debug("生成文档 %s 的题目失败", doc_name, exc_info=True)
+        return []
+
+
+def generate_cross_doc_questions(
+    doc_a: str,
+    doc_b: str,
+    docs_dir: str,
+    model_a: str = ALI_DEFAULT_GENERATOR_MODEL,
+) -> List[Dict[str, Any]]:
+    """基于两篇关联文档片段联合生成 2 道真实跨文档多跳聚合题。"""
+    try:
+        text_a = _extract_doc_text_for_generation(os.path.join(docs_dir, doc_a))
+        text_b = _extract_doc_text_for_generation(os.path.join(docs_dir, doc_b))
+        if not text_a.strip() or not text_b.strip():
+            return []
+        prompt = PROMPT_GENERATE_CROSS_DOC_CASES.format(
+            doc_a=doc_a,
+            doc_b=doc_b,
+            content_a=_sample_doc_content(text_a, window_index=0, max_chars=2100),
+            content_b=_sample_doc_content(text_b, window_index=1, max_chars=2100),
+        )
+        cases = _invoke_generator_json(prompt, model_a=model_a)
+        formatted = _format_generated_cases(
+            cases,
+            default_doc=f"{doc_a} + {doc_b}",
+            default_cat="📚 召回率-多跳聚合题",
+        )
+        for item in formatted:
+            item["category"] = "📚 召回率-多跳聚合题"
+            if "+" not in item["source_doc"]:
+                item["source_doc"] = f"{doc_a} + {doc_b}"
+        return formatted[:2]
+    except Exception:
+        logger.debug("生成跨文档多跳题目失败 (%s + %s)", doc_a, doc_b, exc_info=True)
         return []
 
 
 def generate_benchmark_from_docs(
     docs_dir: str = DOCS_DIR,
-    model_a: str = "qwen3.8-max-0902",
-    max_workers: int = 4,
-    case_count: int = 10
+    model_a: str = ALI_DEFAULT_GENERATOR_MODEL,
+    max_workers: int = DEFAULT_GEN_WORKERS,
+    case_count: int = 10,
+    existing_cases: Optional[List[Dict[str, Any]]] = None,
+    on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> List[Dict[str, Any]]:
     """
-    【广度优先·全库均衡出题】根据目标 case_count，将考题均匀分散到全库不同文档中（实现一文一题，全库覆盖）
+    【混合黄金出题引擎】全库 100% 广度前后段覆盖 (76%) + 真实双文档跨跳多跳题 (24%)，
+    支持保留已有题库增量补齐、自动缺口补齐与实时批次进度回调。
     """
     if not os.path.exists(docs_dir):
         print(f"  ✗ 知识库目录不存在 | {docs_dir}")
         return []
 
-    # 过滤出知识库业务文档（同时支持 .md 与 .txt 业务文档，排除非业务说明文档）
     doc_files = sorted(
         f for f in os.listdir(docs_dir)
         if f.endswith((".md", ".txt", ".docx", ".pdf", ".pptx"))
@@ -367,63 +643,286 @@ def generate_benchmark_from_docs(
         return []
 
     target_count = max(1, case_count) if case_count else 10
-
-    # 核心调度算法：广度优先文档轮询调度
-    # 若目标题数 <= 总文档数，则直接选取 target_count 篇完全不同的文档（100% 覆盖不同文档）
-    # 若目标题数 > 总文档数，则循环轮转分配，确保所有文档至少被覆盖一次
-    tasks = []
-    for i in range(target_count):
-        doc_idx = i % total_available_docs
-        assigned_doc = doc_files[doc_idx]
-        assigned_cat = CATEGORIES_CYCLE[i % len(CATEGORIES_CYCLE)]
-        tasks.append((assigned_doc, assigned_cat))
-
-    unique_docs_count = len(set(t[0] for t in tasks))
-    total_tasks = len(tasks)
-    index_width = len(str(total_tasks))
+    effective_workers = max(1, int(max_workers or DEFAULT_GEN_WORKERS))
     started_at = time.perf_counter()
 
-    print(f"  文档扫描: {total_available_docs} 篇可用 | 本轮覆盖 {unique_docs_count} 篇 | 并发 {max_workers}")
+    def _emit(payload: Dict[str, Any]) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(payload)
+        except Exception:
+            logger.debug("on_progress 回调执行异常", exc_info=True)
 
-    all_cases = []
-    success_docs = 0
-    completed = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_task = {}
-        for doc_name, target_cat in tasks:
-            future = executor.submit(
-                generate_questions_for_doc,
-                doc_name,
-                os.path.join(docs_dir, doc_name),
-                model_a,
-                target_cat
+    all_cases: List[Dict[str, Any]] = []
+    seen_queries = set()
+    covered_docs_so_far = set()
+    used_cross_pairs = set()
+    current_cross_cnt = 0
+
+    for item in (existing_cases or []):
+        if not isinstance(item, dict):
+            continue
+        q = str(item.get("query") or "").strip()
+        if not q:
+            continue
+        q_norm = " ".join(q.split()).lower()
+        if q_norm in seen_queries:
+            continue
+        seen_queries.add(q_norm)
+        copied = dict(item)
+        all_cases.append(copied)
+        parts = [p.strip() for p in str(copied.get("source_doc") or "").split("+") if p.strip()]
+        for p in parts:
+            covered_docs_so_far.add(p)
+        if len(parts) >= 2:
+            current_cross_cnt += 1
+            used_cross_pairs.add(tuple(sorted((parts[0], parts[1]))))
+
+    initial_existing_count = len(all_cases)
+    if initial_existing_count >= target_count:
+        _emit({
+            "event": "meta",
+            "model_a": model_a,
+            "available_docs": total_available_docs,
+            "total_batches": 0,
+            "target_count": target_count,
+            "existing_count": initial_existing_count,
+            "workers": effective_workers,
+            "round": 1,
+            "is_backfill": False,
+        })
+        all_cases = all_cases[:target_count]
+        for idx, c in enumerate(all_cases, start=1):
+            c["id"] = idx
+        return all_cases
+
+    single_cat_pool = [
+        "🔍 精度-高噪辨析题",
+        "🎯 相关性-指令约束题",
+        "🛡️ 忠实度-边界拒答题",
+    ]
+    doc_window_tracker: Dict[str, int] = {}
+
+    def _plan_tasks(need_count: int, is_initial_full: bool) -> List[Dict[str, Any]]:
+        planned: List[Dict[str, Any]] = []
+        if is_initial_full:
+            if need_count < 8:
+                for i in range(need_count):
+                    doc_name = doc_files[i % total_available_docs]
+                    cat = CATEGORIES_CYCLE[i % len(CATEGORIES_CYCLE)]
+                    win_idx = doc_window_tracker.get(doc_name, 0)
+                    doc_window_tracker[doc_name] = win_idx + 1
+                    planned.append({"type": "single", "doc": doc_name, "cat": cat, "window": win_idx})
+                return planned
+
+            cross_target = max(2, int(round(need_count * 0.24)))
+            if cross_target % 2 == 1:
+                cross_target = max(2, cross_target - 1)
+            cross_target = min(cross_target, need_count - 2) if len(doc_files) >= 2 else 0
+            single_target = need_count - cross_target
+
+            cross_pairs = _build_cross_doc_pairs(doc_files, cross_target // 2, exclude_pairs=used_cross_pairs) if cross_target > 0 else []
+            for a, b in cross_pairs:
+                used_cross_pairs.add(tuple(sorted((a, b))))
+            cross_used_docs = {d for pair in cross_pairs for d in pair}
+            ordered_single_docs = [d for d in doc_files if d not in cross_used_docs] + [
+                d for d in doc_files if d in cross_used_docs
+            ]
+            single_batch_cnt = (single_target + 1) // 2
+            for i in range(single_batch_cnt):
+                doc_name = ordered_single_docs[i % len(ordered_single_docs)]
+                win_idx = doc_window_tracker.get(doc_name, 0)
+                doc_window_tracker[doc_name] = win_idx + 1
+                cat1 = single_cat_pool[(i * 2) % len(single_cat_pool)]
+                cat2 = single_cat_pool[(i * 2 + 1) % len(single_cat_pool)]
+                planned.append({"type": "dual", "doc": doc_name, "cats": (cat1, cat2), "window": win_idx})
+            for doc_a, doc_b in cross_pairs:
+                planned.append({"type": "cross", "doc_a": doc_a, "doc_b": doc_b})
+            return planned
+
+        # 增量补齐或缺口重试模式：优先覆盖尚未出现过的文档与未配对的跨文档组合
+        if target_count >= 8 and len(doc_files) >= 2:
+            desired_cross = max(2, int(round(target_count * 0.24)))
+            if desired_cross % 2 == 1:
+                desired_cross = max(2, desired_cross - 1)
+            desired_cross = min(desired_cross, target_count - 2)
+        else:
+            desired_cross = 0
+
+        raw_cross_need = min(need_count, max(0, desired_cross - current_cross_cnt))
+        if raw_cross_need == 1:
+            cross_need = 2 if need_count >= 2 else 0
+        elif raw_cross_need % 2 == 1:
+            cross_need = max(0, raw_cross_need - 1)
+        else:
+            cross_need = raw_cross_need
+
+        cross_pairs = (
+            _build_cross_doc_pairs(doc_files, cross_need // 2, exclude_pairs=used_cross_pairs)
+            if cross_need > 0 else []
+        )
+        for a, b in cross_pairs:
+            used_cross_pairs.add(tuple(sorted((a, b))))
+        actual_cross_planned = len(cross_pairs) * 2
+        single_need = max(0, need_count - actual_cross_planned)
+
+        cross_used_docs = {d for pair in cross_pairs for d in pair}
+        uncovered = [d for d in doc_files if d not in covered_docs_so_far and d not in cross_used_docs]
+        covered_non_cross = [d for d in doc_files if d in covered_docs_so_far and d not in cross_used_docs]
+        covered_in_cross = [d for d in doc_files if d in cross_used_docs]
+        prioritized_docs = uncovered + covered_non_cross + covered_in_cross
+        if not prioritized_docs:
+            prioritized_docs = list(doc_files)
+
+        if single_need == 1:
+            doc_name = prioritized_docs[0]
+            win_idx = doc_window_tracker.get(doc_name, 0)
+            doc_window_tracker[doc_name] = win_idx + 1
+            cat = CATEGORIES_CYCLE[len(all_cases) % len(CATEGORIES_CYCLE)]
+            planned.append({"type": "single", "doc": doc_name, "cat": cat, "window": win_idx})
+        elif single_need > 1:
+            single_batch_cnt = (single_need + 1) // 2
+            for i in range(single_batch_cnt):
+                doc_name = prioritized_docs[i % len(prioritized_docs)]
+                win_idx = doc_window_tracker.get(doc_name, 0)
+                doc_window_tracker[doc_name] = win_idx + 1
+                cat1 = single_cat_pool[(i * 2) % len(single_cat_pool)]
+                cat2 = single_cat_pool[(i * 2 + 1) % len(single_cat_pool)]
+                planned.append({"type": "dual", "doc": doc_name, "cats": (cat1, cat2), "window": win_idx})
+
+        for doc_a, doc_b in cross_pairs:
+            planned.append({"type": "cross", "doc_a": doc_a, "doc_b": doc_b})
+        return planned
+
+    def _run_task(spec: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]]]:
+        t = spec["type"]
+        if t == "cross":
+            label = f"{_shorten(spec['doc_a'], 18)} + {_shorten(spec['doc_b'], 18)} [跨文档]"
+            return label, generate_cross_doc_questions(spec["doc_a"], spec["doc_b"], docs_dir, model_a=model_a)
+        if t == "dual":
+            label = f"{_shorten(spec['doc'], 34)} [双题]"
+            return label, generate_questions_for_doc(
+                spec["doc"],
+                os.path.join(docs_dir, spec["doc"]),
+                model_a=model_a,
+                window_index=spec["window"],
+                dual_categories=spec["cats"],
             )
-            future_to_task[future] = (doc_name, target_cat)
+        cat_label = CATEGORY_SHORT_NAMES.get(spec["cat"], spec["cat"])
+        label = f"{_shorten(spec['doc'], 34)} [{cat_label}]"
+        return label, generate_questions_for_doc(
+            spec["doc"],
+            os.path.join(docs_dir, spec["doc"]),
+            model_a=model_a,
+            target_category=spec["cat"],
+            window_index=spec["window"],
+        )
 
-        for future in as_completed(future_to_task):
-            completed += 1
-            doc_name, target_cat = future_to_task[future]
-            category_label = CATEGORY_SHORT_NAMES.get(target_cat, target_cat)
-            prefix = f"  [{completed:>{index_width}}/{total_tasks}]"
-            try:
-                doc_cases = future.result()
-                if doc_cases:
-                    all_cases.extend(doc_cases)
-                    success_docs += 1
-                    print(f"{prefix} ✓ {_shorten(doc_name)} [{category_label}]")
-                else:
-                    print(f"{prefix} ! {_shorten(doc_name)} [{category_label}] 无有效题目")
-            except Exception as e:
-                print(f"{prefix} ✗ {_shorten(doc_name)} [{category_label}] {_shorten(e, 60)}")
+    global_completed = 0
+    global_total_batches = 0
+    success_batches = 0
 
-    # 精准截取与全局连续编号
+    for round_no in range(1, 4):
+        need_count = target_count - len(all_cases)
+        if need_count <= 0:
+            break
+        is_initial_full = (round_no == 1 and initial_existing_count == 0)
+        tasks = _plan_tasks(need_count, is_initial_full=is_initial_full)
+        if not tasks:
+            break
+
+        global_total_batches += len(tasks)
+        is_backfill = round_no > 1
+        index_width = len(str(global_total_batches))
+        if round_no == 1:
+            print(
+                f"  出题模型: {model_a} | 可用文档: {total_available_docs} 篇 | "
+                f"请求批次: {len(tasks)} 次 (目标 {target_count} 题, 已有 {initial_existing_count} 题) | 并发: {effective_workers}"
+            )
+        else:
+            print(f"  [第 {round_no - 1} 轮缺口自动补齐] 尚缺 {need_count} 题，追加 {len(tasks)} 批次...")
+
+        _emit({
+            "event": "meta",
+            "model_a": model_a,
+            "available_docs": total_available_docs,
+            "total_batches": global_total_batches,
+            "target_count": target_count,
+            "existing_count": initial_existing_count,
+            "workers": effective_workers,
+            "round": round_no,
+            "is_backfill": is_backfill,
+        })
+
+        round_added = 0
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            future_to_task = {}
+            for idx, spec in enumerate(tasks):
+                future = executor.submit(_run_task, spec)
+                future_to_task[future] = spec
+                if idx < len(tasks) - 1:
+                    time.sleep(0.12)
+
+            for future in as_completed(future_to_task):
+                global_completed += 1
+                spec = future_to_task[future]
+                prefix = f"  [{global_completed:>{index_width}}/{global_total_batches}]"
+                label = str(spec.get("doc") or spec.get("doc_a") or "batch")
+                added_cnt = 0
+                try:
+                    label, batch_cases = future.result()
+                    for item in batch_cases:
+                        q_norm = " ".join(item["query"].split()).lower()
+                        if q_norm and q_norm not in seen_queries:
+                            seen_queries.add(q_norm)
+                            all_cases.append(item)
+                            added_cnt += 1
+                            round_added += 1
+                            parts = [p.strip() for p in str(item.get("source_doc") or "").split("+") if p.strip()]
+                            for p in parts:
+                                covered_docs_so_far.add(p)
+                            if len(parts) >= 2:
+                                current_cross_cnt += 1
+                                used_cross_pairs.add(tuple(sorted((parts[0], parts[1]))))
+                    if added_cnt > 0:
+                        success_batches += 1
+                        print(f"{prefix} ✓ {label} (+{added_cnt}题)")
+                    else:
+                        print(f"{prefix} ! {label} 无有效题目")
+                except Exception as e:
+                    print(f"{prefix} ✗ {label} {_shorten(e, 60)}")
+
+                _emit({
+                    "event": "batch_done",
+                    "round": round_no,
+                    "completed": global_completed,
+                    "total_batches": global_total_batches,
+                    "generated_cases": min(len(all_cases), target_count),
+                    "target_count": target_count,
+                    "label": label,
+                    "added": added_cnt,
+                    "ok": added_cnt > 0,
+                })
+
+        if is_backfill and round_added == 0:
+            break
+
     all_cases = all_cases[:target_count]
     for idx, c in enumerate(all_cases, start=1):
         c["id"] = idx
 
-    covered_docs = len(set(c["source_doc"] for c in all_cases))
+    covered_single = set()
+    for c in all_cases:
+        for part in str(c.get("source_doc") or "").split("+"):
+            name = part.strip()
+            if name:
+                covered_single.add(name)
     elapsed = time.perf_counter() - started_at
-    print(f"  生成结果: {success_docs}/{total_tasks} 篇成功 | {len(all_cases)} 题 | 覆盖 {covered_docs} 篇 | {elapsed:.1f}s")
+    print(
+        f"  生成结果: {success_batches}/{global_total_batches} 批成功 | {len(all_cases)} 题 | "
+        f"覆盖 {len(covered_single)} 篇文档 | {elapsed:.1f}s"
+    )
     return all_cases
 
 
@@ -537,22 +1036,28 @@ def save_cases_to_excel(cases: List[Dict[str, Any]], output_path: Optional[str] 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Agentic RAG 自动化测试集生成与人工审核导出工具")
     parser.add_argument("--mode", choices=["from-guide", "generate"], default="from-guide",
-                        help="模式：from-guide (极速导入已精选的20道题，1秒完成) 或 generate (调用 qwen3.8-max-0902 重新从文档派生)")
-    parser.add_argument("--model-a", default="qwen3.8-max-0902", help="模型 A 命题专家模型名称")
+                        help="模式：from-guide (极速导入已精选的20道题，1秒完成) 或 generate (调用 glm-5.2 混合派生全库题库)")
+    parser.add_argument("--model-a", default=ALI_DEFAULT_GENERATOR_MODEL, help="模型 A 命题专家模型名称 (默认 glm-5.2)")
+    parser.add_argument("--count", type=int, default=20, help="生成题数 (例如 20 / 50 / 100)")
     parser.add_argument("--output", default=os.path.join(BENCHMARK_DIR, "待审核基准测试集.xlsx"),
                         help="导出的 Excel 文件路径")
-    parser.add_argument("--workers", type=int, default=3, help="并发请求线程数")
+    parser.add_argument("--workers", type=int, default=DEFAULT_GEN_WORKERS, help="并发请求线程数 (默认 8)")
 
     args = parser.parse_args()
 
-    print(f"\n[出题] 模式 {args.mode} | 输出 {args.output}")
+    print(f"\n[出题] 模式 {args.mode} | 题数 {args.count} | 输出 {args.output}")
 
     if args.mode == "from-guide":
         print("  来源: 精选题库指南")
-        cases = parse_guide_markdown()
+        cases = parse_guide_markdown(case_count=args.count)
     else:
         print(f"  模型 {args.model_a} | 并发 {args.workers}")
-        cases = generate_benchmark_from_docs(docs_dir=DOCS_DIR, model_a=args.model_a, max_workers=args.workers)
+        cases = generate_benchmark_from_docs(
+            docs_dir=DOCS_DIR,
+            model_a=args.model_a,
+            max_workers=args.workers,
+            case_count=args.count,
+        )
 
     if cases:
         out_file = export_to_excel(cases, args.output)

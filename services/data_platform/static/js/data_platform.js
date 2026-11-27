@@ -36,7 +36,13 @@ async function loadDocuments() {
         const resp = await fetch("/api/v1/data/documents");
         if (!resp.ok) throw new Error("获取文档列表失败");
         const result = await resp.json();
-        const docs = result.data?.documents || [];
+        const docs = (result.data?.documents || []).slice();
+        docs.sort((a, b) => {
+            const ta = String(a.created_at || a.upload_time || "");
+            const tb = String(b.created_at || b.upload_time || "");
+            if (ta !== tb) return tb.localeCompare(ta);
+            return String(a.doc_name || a.name || "").localeCompare(String(b.doc_name || b.name || ""));
+        });
 
         document.getElementById("stat-total-docs").innerText = docs.length;
         const totalChunks = docs.reduce((acc, d) => acc + (d.chunk_count || d.total_chunks || 0), 0);

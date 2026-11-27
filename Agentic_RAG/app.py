@@ -113,14 +113,39 @@ if os.path.isdir(STATIC_DIR):
 
 TEMPLATES_DIR = os.path.join(CURRENT_DIR, "templates")
 INDEX_HTML_PATH = os.path.join(TEMPLATES_DIR, "index.html")
+FRONTEND_DIST_DIR = os.path.join(PROJECT_ROOT, "frontend", "dist")
+FRONTEND_ASSETS_DIR = os.path.join(FRONTEND_DIST_DIR, "assets")
+FRONTEND_INDEX_HTML = os.path.join(FRONTEND_DIST_DIR, "index.html")
+
+if os.path.isdir(FRONTEND_ASSETS_DIR):
+    app.mount("/assets", StaticFiles(directory=FRONTEND_ASSETS_DIR), name="frontend_assets")
+
+
+def _serve_frontend_entry():
+    target_path = FRONTEND_INDEX_HTML if os.path.exists(FRONTEND_INDEX_HTML) else INDEX_HTML_PATH
+    if not os.path.exists(target_path):
+        raise HTTPException(status_code=404, detail="前端页面入口文件未找到")
+    with open(target_path, "r", encoding="utf-8") as f:
+        html_content = f.read()
+    return HTMLResponse(content=html_content)
+
 
 # ==============================================================================
 # 二、 基础页面与系统状态自检路由
 # ==============================================================================
 
 @app.get("/", response_class=HTMLResponse, summary="渲染前端交互主页面")
+@app.get("/chat", response_class=HTMLResponse, summary="渲染统一前端智能问答视图")
+@app.get("/knowledge", response_class=HTMLResponse, summary="渲染统一前端知识中台视图")
+@app.get("/eval", response_class=HTMLResponse, summary="渲染统一前端评测中枢视图")
 def index():
-    """读取并返回前端交互主页面 HTML"""
+    """优先返回 Vue 3 构建产物，未构建时自动回退至原版模板"""
+    return _serve_frontend_entry()
+
+
+@app.get("/legacy", response_class=HTMLResponse, summary="渲染原版前端页面")
+def legacy_index():
+    """保留原版原生页面访问入口"""
     if not os.path.exists(INDEX_HTML_PATH):
         raise HTTPException(status_code=404, detail="前端模板 index.html 未找到")
     with open(INDEX_HTML_PATH, "r", encoding="utf-8") as f:

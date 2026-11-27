@@ -29,3 +29,10 @@ logs/
 #文件名
 Git常用操作流程.md
 知识md
+
+# 前端依赖与临时缓存
+frontend/node_modules/
+frontend/.vite/
+
+# 评测流水线运行时断点缓存（由最新评测报告/作答记录归档）
+services/eval_platform/benchmarks/checkpoint_*.jsonl

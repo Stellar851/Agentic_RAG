@@ -28,6 +28,7 @@ import sys
 import re
 import json
 import time
+import random
 from typing import List, Dict, Any, Optional, Tuple
 
 # 确保 Windows 终端输出 UTF-8 编码，防止 emoji 或特殊字符在 GBK 环境下抛出 UnicodeEncodeError
@@ -48,6 +49,9 @@ from models import ALI_DEFAULT_JUDGE_MODEL, get_deepseek_llm
 # 裁判单次调用上限与 SDK 重试次数均可通过环境变量调整。
 DEFAULT_JUDGE_TIMEOUT_SECONDS = max(15, int(os.getenv("RAG_JUDGE_TIMEOUT_SECONDS", "90")))
 DEFAULT_JUDGE_MAX_RETRIES = max(0, int(os.getenv("RAG_JUDGE_MAX_RETRIES", "1")))
+DEFAULT_JUDGE_MAX_TOKENS = max(256, int(os.getenv("RAG_JUDGE_MAX_TOKENS", "4096")))
+DEFAULT_JUDGE_RATE_LIMIT_RETRIES = max(0, int(os.getenv("RAG_JUDGE_RATE_LIMIT_RETRIES", "3")))
+DEFAULT_DASHSCOPE_WAIT_TIMEOUT = str(os.getenv("DASHSCOPE_WAIT_TIMEOUT", "60")).strip()
 JUDGE_CONTEXT_MAX_CHARS = max(2000, int(os.getenv("RAG_JUDGE_CONTEXT_MAX_CHARS", "12000")))
 JUDGE_CONTEXT_ITEM_MAX_CHARS = max(400, int(os.getenv("RAG_JUDGE_CONTEXT_ITEM_MAX_CHARS", "1800")))
 JUDGE_RESPONSE_MAX_CHARS = max(800, int(os.getenv("RAG_JUDGE_RESPONSE_MAX_CHARS", "4000")))
@@ -57,13 +61,29 @@ class JudgeOutputError(ValueError):
     """裁判返回内容缺失、非 JSON 或分值不完整。"""
 
 
+def is_rate_limit_error(error: Any) -> bool:
+    """识别 429 或突发限流类异常文本。"""
+    text = str(error or "").lower()
+    markers = ("429", "rate limit", "too many requests", "burst", "throttl")
+    return any(m in text for m in markers)
+
+
+def is_quota_exhausted_error(error: Any) -> bool:
+    """识别账户额度耗尽或欠费等 403 不可重试配额故障。"""
+    text = str(error or "").lower()
+    markers = ("quota", "arrearage", "insufficient", "403", "allocationquota", "free tier")
+    return any(m in text for m in markers)
+
+
 def _classify_judge_error(error: Exception) -> str:
     """将裁判异常归并为稳定、可统计的故障类型。"""
     text = str(error).lower()
+    if is_quota_exhausted_error(error):
+        return "judge_quota"
+    if is_rate_limit_error(error):
+        return "judge_rate_limit"
     if "timeout" in text or "timed out" in text:
         return "judge_timeout"
-    if "quota" in text or "403" in text:
-        return "judge_quota"
     if "401" in text or "invalid_api_key" in text:
         return "judge_auth"
     if "json" in text or "score" in text:
@@ -121,22 +141,68 @@ class RagasEvaluator:
 
     def __init__(self, model_name: Optional[str] = None):
         """
-        初始化评估引擎，配置专用的评估裁判大模型（按用户指定统一选用通义千问旗舰 qwen3.8-max-0902 独立裁判）
+        初始化评估引擎，配置专用的评估裁判大模型（默认选用 kimi-k3 独立裁判）
         """
-        self.model_name = (model_name or "").strip() or "qwen3.8-max-0902"
+        self.model_name = (model_name or "").strip() or ALI_DEFAULT_JUDGE_MODEL
         # 兼容旧配置中的 glm-5.3（自动平滑对齐至 deepseek-v4-pro-0813）
         if self.model_name in ["glm-5.3", "glm5.3", "glm"]:
             self.model_name = "deepseek-v4-pro-0813"
             
         self.timeout_seconds = DEFAULT_JUDGE_TIMEOUT_SECONDS
         self.max_retries = DEFAULT_JUDGE_MAX_RETRIES
-        self.llm = get_deepseek_llm(
-            model=self.model_name,
-            temperature=0.0,
-            streaming=False,
-            timeout=self.timeout_seconds,
-            max_retries=self.max_retries
-        )
+        self.max_tokens = DEFAULT_JUDGE_MAX_TOKENS
+        self.rate_limit_retries = DEFAULT_JUDGE_RATE_LIMIT_RETRIES
+
+        self._base_llm_kwargs = {
+            "model": self.model_name,
+            "temperature": 0.0,
+            "streaming": False,
+            "timeout": self.timeout_seconds,
+            "max_retries": self.max_retries,
+            "max_tokens": self.max_tokens,
+        }
+        self._use_disable_thinking = True
+        self.llm = self._build_llm(disable_thinking=self._use_disable_thinking)
+
+    def _build_llm(self, disable_thinking: bool = True):
+        """构造裁判模型实例，按需附加 enable_thinking=False 以避免思考链耗尽输出预算。"""
+        kwargs = dict(self._base_llm_kwargs)
+        if disable_thinking:
+            kwargs["extra_body"] = {"enable_thinking": False}
+        if DEFAULT_DASHSCOPE_WAIT_TIMEOUT:
+            try:
+                return get_deepseek_llm(
+                    **kwargs,
+                    default_headers={"X-DashScope-Wait-Timeout": DEFAULT_DASHSCOPE_WAIT_TIMEOUT},
+                )
+            except TypeError:
+                return get_deepseek_llm(**kwargs)
+        return get_deepseek_llm(**kwargs)
+
+    def _invoke_with_backoff(self, prompt: str):
+        """针对 429 突发限流实施指数退避重试；遇到不支持 thinking 参数自动回退，配额耗尽立即熔断。"""
+        rl_attempts = 0
+        while True:
+            try:
+                return self.llm.invoke(prompt)
+            except Exception as exc:
+                if is_quota_exhausted_error(exc):
+                    raise
+                err_low = str(exc).lower()
+                is_unsupported_extra = self._use_disable_thinking and any(
+                    tok in err_low
+                    for tok in ("enable_thinking", "extra_body", "unknown parameter", "unrecognized", "invalid_request", "400")
+                )
+                if is_unsupported_extra:
+                    self._use_disable_thinking = False
+                    self.llm = self._build_llm(disable_thinking=False)
+                    continue
+                if is_rate_limit_error(exc) and rl_attempts < self.rate_limit_retries:
+                    delay = min(16.0, 2.0 ** (rl_attempts + 1)) + random.uniform(0.0, 0.8)
+                    time.sleep(delay)
+                    rl_attempts += 1
+                    continue
+                raise
 
     def evaluate_single(
         self,
@@ -232,7 +298,7 @@ class RagasEvaluator:
             last_parse_error = None
             for attempt in range(2):
                 retry_suffix = "" if attempt == 0 else "\n\n上一次输出不是合法 JSON。请只输出 JSON 对象，不要 Markdown 或解释。"
-                res_obj = self.llm.invoke(judge_prompt + retry_suffix)
+                res_obj = self._invoke_with_backoff(judge_prompt + retry_suffix)
                 raw_content = res_obj.content.strip() if hasattr(res_obj, "content") else str(res_obj).strip()
                 try:
                     parsed_scores = _parse_judge_scores(raw_content, requires_recall=has_ground_truth)

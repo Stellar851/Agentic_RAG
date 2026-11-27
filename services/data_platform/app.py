@@ -226,6 +226,14 @@ def list_documents():
     try:
         vs = get_vector_store()
         docs = vs.list_all_documents()
+        docs = sorted(
+            docs,
+            key=lambda d: (
+                str(d.get("upload_time") or d.get("created_at") or ""),
+                str(d.get("doc_name") or d.get("name") or ""),
+            ),
+            reverse=True,
+        )
         return {
             "code": 200,
             "data": {

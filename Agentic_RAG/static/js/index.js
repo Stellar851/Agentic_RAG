@@ -55,6 +55,7 @@ let currentSessionId = null;
 
         // 全局支持的模型缓存
         let cachedSupportedModels = [
+            { model_name: 'qwen3.6-plus-2026-04-02', short_name: 'Qwen 3.6 Plus', name: '通义千问 3.6 Plus', desc: '均衡推理主力 · 阿里百炼平台提供', is_configured: true },
             { model_name: 'deepseek-v4.1-flash', short_name: 'DeepSeek V4.1 Flash', name: 'DeepSeek V4.1 Flash', desc: '极速推理主力 · 阿里百炼平台提供', is_configured: true },
             { model_name: 'qwen3.8-flash', short_name: '3.8-flash', name: '通义千问 3.8-flash', desc: '全方位主力 · 极速流利回答', is_configured: true },
             { model_name: 'qwen3.8-max-0902', short_name: '3.8 Max', name: '通义千问 3.8 Max', desc: '顶级逻辑旗舰 · 深度多跳推理', is_configured: true },

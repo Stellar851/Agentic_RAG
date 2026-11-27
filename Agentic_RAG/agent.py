@@ -353,7 +353,7 @@ class AgenticRAGService:
             verbose=verbose,
             return_intermediate_steps=True,
             max_iterations=AGENT_MAX_ITERATIONS,
-            early_stopping_method="generate",
+            early_stopping_method="force",
         )
         return executor, actual_model
 

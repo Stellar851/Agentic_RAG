@@ -7,8 +7,8 @@ Agentic RAG 企业级智能关联知识库系统
 作为三大微服务的单一模型事实源，集中管理所有模型 API、注册表与工厂入口：
 1. 大语言模型 (LLM):
    - 通用动态路由入口: get_llm(model_name=...)
-   - 专职出题与裁判模型: get_judge_llm() -> 严格锁定 qwen3.8-max-0902 (阿里百炼逻辑旗舰)
-   - 专职考生与问答模型: get_answer_llm() -> 严格锁定 deepseek-v4.1-flash (兼容旧别名 deepseek-v4-flash-0731 / qwen3.7-plus)
+   - 专职出题与裁判模型: get_judge_llm() -> 严格锁定 kimi-k3 (阿里百炼深度反思模型)
+   - 专职考生与问答模型: get_answer_llm() -> 严格锁定 qwen3.6-flash-2026-04-16 (旧耗尽模型已兜底迁移)
    - 兼容别名: get_deepseek_llm
 2. 文本嵌入模型 (Embedding):
    - 统一入口: get_embeddings() / get_ollama_embeddings() -> 本地 Ollama bge-m3 (1024 维初筛)
@@ -21,9 +21,11 @@ Agentic RAG 企业级智能关联知识库系统
 import os
 import sys
 import logging
+import threading
 import warnings
 warnings.filterwarnings("ignore")
 import requests
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Dict, Any, List
 
 if sys.platform == "win32":
@@ -34,7 +36,6 @@ if sys.platform == "win32":
         pass
 
 from langchain_openai import ChatOpenAI
-from langchain_community.embeddings import OllamaEmbeddings
 from langchain_core.embeddings import Embeddings
 
 logger = logging.getLogger(__name__)
@@ -48,8 +49,9 @@ logger = logging.getLogger(__name__)
 ALI_API_KEY_ENV_VAR: str = "DASHSCOPE_API_KEY"
 ALI_BASE_URL: str = "https://ws-kcf6twfk4vfy5l1e.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
 ALI_OFFICIAL_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-ALI_DEFAULT_ANSWER_MODEL: str = "deepseek-v4.1-flash"  # 考生系统与默认作答模型
-ALI_DEFAULT_JUDGE_MODEL: str = "qwen3.8-max-0902"  # 出题专家与量化裁判模型
+ALI_DEFAULT_ANSWER_MODEL: str = "qwen3.6-flash-2026-04-16"  # 考生系统与默认作答模型
+ALI_DEFAULT_JUDGE_MODEL: str = "kimi-k3"  # 量化裁判模型
+ALI_DEFAULT_GENERATOR_MODEL: str = "glm-5.2"  # 出题专家默认模型
 
 # 2. DeepSeek 配置 (兼容独立中转/AutoDL 算力机)
 DEEPSEEK_API_KEY_ENV_VAR: str = "Auto_aip_key"
@@ -82,11 +84,11 @@ DEFAULT_RERANK_MODEL: str = ALI_DEFAULT_RERANK_MODEL
 # ==============================================================================
 
 SUPPORTED_MODELS: Dict[str, Dict[str, Any]] = {
-    "deepseek-v4.1-flash": {
-        "id": "deepseek-v4.1-flash",
-        "name": "DeepSeek V4.1 Flash",
-        "short_name": "DeepSeek V4.1 Flash",
-        "desc": "极速推理主力 · 阿里百炼平台提供",
+    "qwen3.6-flash-2026-04-16": {
+        "id": "qwen3.6-flash-2026-04-16",
+        "name": "通义千问 3.6 Flash",
+        "short_name": "Qwen 3.6 Flash",
+        "desc": "极速高配额备选 · 阿里百炼平台提供",
         "base_url": ALI_BASE_URL,
         "key_env": ALI_API_KEY_ENV_VAR,
         "provider": "阿里百炼",
@@ -105,6 +107,24 @@ SUPPORTED_MODELS: Dict[str, Dict[str, Any]] = {
         "name": "通义千问 3.8 Max",
         "short_name": "3.8 Max",
         "desc": "顶级逻辑旗舰 · 深度多跳推理",
+        "base_url": ALI_BASE_URL,
+        "key_env": ALI_API_KEY_ENV_VAR,
+        "provider": "阿里百炼",
+    },
+    "kimi-k3": {
+        "id": "kimi-k3",
+        "name": "Kimi K3",
+        "short_name": "Kimi K3",
+        "desc": "深度反思逻辑旗舰 · 阿里百炼平台提供",
+        "base_url": ALI_BASE_URL,
+        "key_env": ALI_API_KEY_ENV_VAR,
+        "provider": "阿里百炼",
+    },
+    "glm-5.2": {
+        "id": "glm-5.2",
+        "name": "GLM 5.2",
+        "short_name": "GLM 5.2",
+        "desc": "高性价比长文命题专家 · 阿里百炼平台提供",
         "base_url": ALI_BASE_URL,
         "key_env": ALI_API_KEY_ENV_VAR,
         "provider": "阿里百炼",
@@ -160,9 +180,16 @@ def get_llm(
         canonical_model = "deepseek-v4-pro-0813"
     elif target_model.lower() in ["ds-pro", "deepseek-pro", "deepseek-v4-pro"]:
         canonical_model = "deepseek-v4-pro-0813"
-    elif target_model.lower() in ["deepseek-v4-flash-0731", "deepseek-v4-flash", "ds-flash", "deepseek-flash"]:
-        canonical_model = "deepseek-v4.1-flash"
-    elif target_model.lower() in ["qwen3.7-plus", "qwen3.7", "3.7-plus", "3.7plus", "qwen-3.7-plus"]:
+    elif target_model.lower() in ["qwen3.6-flash", "3.6-flash", "qwen-3.6-flash"]:
+        canonical_model = "qwen3.6-flash-2026-04-16"
+    elif target_model.lower() in [
+        "qwen3.8-27b", "3.8-27b", "qwen-3.8-27b",
+        "qwen3.6-plus-2026-04-02", "qwen3.6-plus", "qwen-3.6-plus", "3.6-plus",
+        "deepseek-v4.1-flash", "deepseek-v4.1-flash-1017", "deepseek-v4-flash-0731",
+        "deepseek-v4-flash", "ds-flash", "deepseek-flash",
+        "qwen3.7-plus", "qwen3.7", "3.7-plus", "3.7plus", "qwen-3.7-plus",
+    ]:
+        # 已耗尽配额的历史模型统一兜底迁移至当前默认作答模型
         canonical_model = ALI_DEFAULT_ANSWER_MODEL
     else:
         for k in SUPPORTED_MODELS:
@@ -183,13 +210,14 @@ def get_llm(
     api_key = os.getenv(key_env, "")
     logger.debug("LLM 路由就绪: model=%s base_url=%s", actual_model_name, base_url)
 
+    extra_body = kwargs.pop("extra_body", None)
     return ChatOpenAI(
         model=actual_model_name,
         api_key=api_key,
         base_url=base_url,
         temperature=temperature,
         streaming=streaming,
-        extra_body={},
+        extra_body=extra_body if extra_body is not None else {},
         **kwargs
     )
 
@@ -199,7 +227,7 @@ def get_judge_llm(
     streaming: bool = False,
     **kwargs
 ) -> ChatOpenAI:
-    """出题专家 & 独立反思裁判模型获取器（锁定 qwen3.8-max-0902）。"""
+    """独立反思裁判模型获取器（默认锁定 kimi-k3）。"""
     return get_llm(
         model=ALI_DEFAULT_JUDGE_MODEL,
         temperature=temperature,
@@ -213,7 +241,7 @@ def get_answer_llm(
     streaming: bool = True,
     **kwargs
 ) -> ChatOpenAI:
-    """考生作答模型获取器（锁定当前激活作答模型 deepseek-v4.1-flash）。"""
+    """考生作答模型获取器（锁定当前激活作答模型 qwen3.6-flash-2026-04-16）。"""
     return get_llm(
         model=ALI_DEFAULT_ANSWER_MODEL,
         temperature=temperature,
@@ -227,17 +255,70 @@ get_deepseek_llm = get_llm
 
 
 # ==============================================================================
-# 四、 文本嵌入向量 (Embedding) 工厂
+# 四、 文本嵌入向量 (Embedding) 工厂 (原生 /api/embed 真批量)
 # ==============================================================================
+
+class BatchOllamaEmbeddings(Embeddings):
+    """基于 Ollama /api/embeddings 多线程并发向量化客户端，确保与存量 ChromaDB 未归一化向量空间完全对齐。"""
+
+    def __init__(
+        self,
+        model: str = OLLAMA_EMBEDDING_MODEL,
+        base_url: str = OLLAMA_BASE_URL,
+        batch_size: int = 16,
+        timeout: int = 120,
+        max_workers: Optional[int] = None,
+    ):
+        self.model = model
+        self.base_url = (base_url or OLLAMA_BASE_URL).rstrip("/")
+        self.batch_size = max(1, int(batch_size))
+        self.timeout = max(10, int(timeout))
+        default_workers = max(1, int(os.getenv("OLLAMA_NUM_PARALLEL", "8")))
+        self.max_workers = max(1, int(max_workers if max_workers is not None else default_workers))
+        self._local = threading.local()
+
+    def _get_session(self) -> requests.Session:
+        sess = getattr(self._local, "session", None)
+        if sess is None:
+            sess = requests.Session()
+            self._local.session = sess
+        return sess
+
+    def _embed_single(self, text: str) -> List[float]:
+        resp = self._get_session().post(
+            f"{self.base_url}/api/embeddings",
+            json={"model": self.model, "prompt": str(text)},
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()["embedding"]
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        if not texts:
+            return []
+        str_texts = [str(t) for t in texts]
+        if len(str_texts) == 1 or self.max_workers <= 1:
+            return [self._embed_single(item) for item in str_texts]
+        workers = min(self.max_workers, len(str_texts))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(self._embed_single, str_texts))
+
+    def embed_query(self, text: str) -> List[float]:
+        return self._embed_single(str(text))
+
 
 def get_embeddings(
     model: str = OLLAMA_EMBEDDING_MODEL,
     base_url: str = OLLAMA_BASE_URL
 ) -> Embeddings:
     """获取 Ollama 本地部署的稠密文本嵌入模型 (默认 1024 维 Dense 向量 bge-m3)。"""
-    return OllamaEmbeddings(
+    batch_size = max(1, int(os.getenv("OLLAMA_EMBED_BATCH_SIZE", "16")))
+    max_workers = max(1, int(os.getenv("OLLAMA_NUM_PARALLEL", "8")))
+    return BatchOllamaEmbeddings(
         model=model,
-        base_url=base_url
+        base_url=base_url,
+        batch_size=batch_size,
+        max_workers=max_workers,
     )
 
 

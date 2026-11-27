@@ -208,15 +208,11 @@ def list_available_documents() -> str:
     docs = vs.list_all_documents()
     if not docs:
         return "当前知识库为空，尚未录入任何业务文档。"
-    summary_list = [
-        {
-            "文档名称": d.get("doc_name"),
-            "切片总数": d.get("chunk_count") or d.get("total_chunks", 0),
-            "文件大小": d.get("file_size_formatted", "--")
-        }
+    lines = [
+        f"- {d.get('doc_name')} ({d.get('chunk_count') or d.get('total_chunks', 0)}切片)"
         for d in docs
     ]
-    return json.dumps(summary_list, ensure_ascii=False, indent=2)
+    return f"知识库共 {len(docs)} 篇文档：\n" + "\n".join(lines)
 
 
 # ==============================================================================

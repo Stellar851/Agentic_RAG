@@ -261,7 +261,9 @@ class TestEvalRunnerAndSummary(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             out_xlsx = os.path.join(tmpdir, "report.xlsx")
-            benchmark_runner.export_evaluation_report(summary, out_xlsx)
+            with mock.patch.object(benchmark_runner, "BENCHMARK_DIR", tmpdir), \
+                 mock.patch.object(benchmark_runner, "LATEST_REPORT_JSON", os.path.join(tmpdir, "latest_report.json")):
+                benchmark_runner.export_evaluation_report(summary, out_xlsx)
             self.assertTrue(os.path.exists(out_xlsx))
             self.assertGreater(os.path.getsize(out_xlsx), 0)
 
